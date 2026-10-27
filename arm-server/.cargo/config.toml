@@ -1,0 +1,6 @@
+# Jetson Nano build from any host: a static musl binary sidesteps the Jetson's
+# old glibc (Ubuntu 20.04 family, 2.31 - estimated, not read off the device).
+#   rustup target add aarch64-unknown-linux-musl
+#   cargo build --release --target aarch64-unknown-linux-musl
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"

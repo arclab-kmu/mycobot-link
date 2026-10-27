@@ -1,0 +1,18 @@
+{
+  "brain_to_arm": [
+    { "type": "ping" },
+    { "type": "enable", "id": 1 },
+    { "type": "move_joints", "id": 2, "angles_deg": [0, -10.5, 20, 0, 0, 45], "speed": 20 },
+    { "type": "gripper", "id": 3, "value": 40, "speed": 50 },
+    { "type": "stop", "id": 4 },
+    { "type": "disable", "id": 5 }
+  ],
+  "arm_to_brain": [
+    { "type": "hello", "protocol": 1, "server": "mycobot-arm/0.1.0", "live": false, "watchdog_ms": 500, "state_hz": 10.0 },
+    { "type": "reply", "id": 2, "ok": true },
+    { "type": "reply", "id": 2, "ok": false, "error": "J2 is 25.0 deg from the measured angle (max 20.0)" },
+    { "type": "reply", "id": null, "ok": false, "error": "bad request: missing field `id`" },
+    { "type": "state", "seq": 7, "angles_deg": [0.0, -10.5, 20.0, 0.0, 0.0, 45.0], "read_age_ms": 3, "gate_open": true, "gate_reason": "enabled by brain", "live": false },
+    { "type": "state", "seq": 8, "angles_deg": null, "read_age_ms": 120, "gate_open": false, "gate_reason": "watchdog: no line from the brain for 512 ms", "live": true }
+  ]
+}

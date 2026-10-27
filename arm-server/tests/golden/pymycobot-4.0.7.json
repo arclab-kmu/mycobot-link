@@ -1,0 +1,125 @@
+{
+  "generated_by": "tools/golden_frames.py",
+  "pymycobot": "4.0.7",
+  "pyserial": "3.5",
+  "class": "MyCobot280",
+  "requests": [
+    {
+      "call": "get_angles",
+      "args": [],
+      "frame": "fefe0220fa",
+      "writes": 1
+    },
+    {
+      "call": "send_angles",
+      "args": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        20
+      ],
+      "frame": "fefe0f2200000000000000000000000014fa",
+      "writes": 3
+    },
+    {
+      "call": "send_angles",
+      "args": [
+        [
+          0.29,
+          -45.678,
+          90,
+          -0.005,
+          150,
+          -179.99
+        ],
+        50
+      ],
+      "frame": "fefe0f22001cee29232800003a98b9b132fa",
+      "writes": 3
+    },
+    {
+      "call": "send_angles",
+      "args": [
+        [
+          -165,
+          137,
+          -147,
+          147,
+          -152,
+          177
+        ],
+        1
+      ],
+      "frame": "fefe0f22bf8c3584c694396cc4a0452401fa",
+      "writes": 3
+    },
+    {
+      "call": "stop",
+      "args": [],
+      "frame": "fefe0229fa",
+      "writes": 3
+    },
+    {
+      "call": "set_fresh_mode",
+      "args": [
+        1
+      ],
+      "frame": "fefe031601fa",
+      "writes": 3
+    },
+    {
+      "call": "set_fresh_mode",
+      "args": [
+        0
+      ],
+      "frame": "fefe031600fa",
+      "writes": 3
+    },
+    {
+      "call": "set_gripper_value",
+      "args": [
+        40,
+        50
+      ],
+      "frame": "fefe04672832fa",
+      "writes": 3
+    },
+    {
+      "call": "get_gripper_value",
+      "args": [],
+      "frame": "fefe0265fa",
+      "writes": 3
+    },
+    {
+      "call": "is_power_on",
+      "args": [],
+      "frame": "fefe0212fa",
+      "writes": 3
+    },
+    {
+      "call": "get_error_information",
+      "args": [],
+      "frame": "fefe0207fa",
+      "writes": 3
+    }
+  ],
+  "replies": [
+    {
+      "call": "get_angles",
+      "reply": "fefe0e2004d2ee282328ffff3a98b9b1fa",
+      "result": [
+        12.34,
+        -45.68,
+        90.0,
+        -0.01,
+        150.0,
+        -179.99
+      ]
+    }
+  ]
+}

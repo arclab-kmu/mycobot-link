@@ -1,0 +1,11 @@
+# Rust
+arm-server/target/
+
+# Python
+__pycache__/
+*.py[codz]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
