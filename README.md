@@ -1,11 +1,12 @@
 # mycobot-link
 
-DGX Spark(vLLM)와 myCobot 280 JN을 ROS 없이 잇는 프로젝트입니다. 두 프로그램으로 나뉩니다.
+DGX Spark(vLLM)와 myCobot 280 JN을 ROS 없이 잇는 프로젝트입니다. 세 프로그램으로 나뉩니다.
 
 | 위치 | 디렉터리 | 언어 | 역할 |
 | --- | --- | --- | --- |
-| DGX Spark | `brain/` | Python (표준 라이브러리만) | vLLM에 동작을 묻고, 스킬 요청을 보내고, 팔 상태를 받는다 |
+| DGX Spark | `brain/` | Python (표준 라이브러리만) | 카메라 프레임과 팔 상태를 받아 vLLM에 동작을 묻고, 스킬 요청을 보낸다 |
 | Jetson Nano | `arm-server/` | Rust | 모든 안전 검사를 하고, 통과한 명령만 `/dev/ttyTHS1`로 보낸다 |
+| Jetson Nano | `camera-push/` | Python 3.8 표준 라이브러리 + `ffmpeg` | 손목 카메라 `/dev/video0`의 JPEG를 Spark로 보낸다. 팔에는 닿지 않는다 |
 
 ```mermaid
 flowchart LR
@@ -17,13 +18,15 @@ flowchart LR
     subgraph J["myCobot 280 JN · Jetson Nano"]
         A["arm-server · Rust<br/>gate · 한계 · 20° · 신선도 · watchdog"]
         A -->|"FE FE … FA<br/>/dev/ttyTHS1 1 Mbaud"| M["Atom · 서보"]
+        C["camera_push · ffmpeg<br/>/dev/video0 손목 카메라"]
     end
     A -- "TCP connect → :47900" --> B
+    C -- "TCP connect → :47901<br/>JPEG 5 Hz" --> B
     B -. "enable · move_joints · gripper · stop · ping" .-> A
     A -. "hello · reply · state 10 Hz" .-> B
 ```
 
-Jetson이 Spark에 접속하고(공유기 NAT 때문), 그 연결 하나로 명령·응답·상태가 오갑니다. 메시지 형식은 [`schema/PROTOCOL.md`](schema/PROTOCOL.md)에 있습니다.
+Jetson이 Spark에 접속하고(공유기 NAT 때문), 팔 연결 하나로 명령·응답·상태가 오갑니다. 카메라 프레임은 두 번째 연결로 따로 옵니다. 메시지 형식은 [`schema/PROTOCOL.md`](schema/PROTOCOL.md)에 있습니다.
 
 핵심 원칙은 세 가지입니다.
 
@@ -81,15 +84,48 @@ uv run mycobot-brain ask "베이스를 왼쪽으로 조금 돌려" --execute   #
 
 `--live`는 vendor ROS 노드·`mycobot-control`과 같은 `/tmp/mycobot_lock`을 잡습니다. 따라서 이들과 동시에 실행할 수 없습니다.
 
-## 검증 상태 (2026-10-27)
+## 카메라를 보고 움직이기
+
+Jetson에서 카메라 전송을 띄웁니다. 팔 서버와 함께 돌아도 되고, 시스템 `python3`(3.8)와 `ffmpeg`만 씁니다.
+
+```bash
+python3 camera-push/camera_push.py --brain 210.123.42.157:47901   # /dev/video0, 640x480, 5 Hz
+```
+
+Spark에서는 먼저 vLLM이 카메라 화면을 제대로 읽는지 봅니다. `look`은 팔 연결이 없어도 됩니다. 프레임은 `runs/`에 저장됩니다.
+
+```bash
+uv run mycobot-brain look                                  # 한 장 저장 + vLLM 묘사
+uv run mycobot-brain look "그리퍼 바로 아래에 뭐가 있어?"
+uv run mycobot-brain act "흰 테이프 롤이 화면 가운데 오게 해"            # 첫 한 걸음 제안만
+uv run mycobot-brain act "흰 테이프 롤이 화면 가운데 오게 해" --execute  # 보고-움직이기 반복
+```
+
+`act`는 매 라운드마다 팔이 멈춘 뒤 도착한 프레임을 vLLM에 보냅니다. 두 번째 라운드부터는 직전 프레임도 함께 보냅니다. vLLM은 관절 변화량(delta) 한 번을 고르고, 두뇌는 **측정한 관절각 + delta**를 목표로 보냅니다. 끝나는 조건은 vLLM이 `done`이라고 하거나, `--steps`(기본 5)를 다 쓰거나, 어느 쪽에서든 거부가 나올 때입니다. 끝나면 gate를 닫습니다.
+
+| 옵션 | 기본 | 뜻 |
+| --- | --- | --- |
+| `--max-step` | 5° | 한 라운드에 관절 하나가 바뀔 수 있는 최대량. 넘으면 잘라서 보내지 않고 루프를 멈춥니다 |
+| `--max-total` | 30° | 시작 자세에서 이만큼 벗어나는 목표가 나오면 멈춥니다 |
+| `--lock 2,3` | 없음 | 움직이면 안 되는 관절 |
+| `--speed` | 10 | `move_joints` 속도 |
+| `--settle` | 1.5 s | 보낸 뒤 다음 프레임을 받기 전 기다리는 시간(실측 근거 없음) |
+| `--camera` | `wrist` | 프롬프트에 카메라 위치를 손목/고정 중 무엇으로 알릴지 |
+
+관절 부호가 화면을 어느 쪽으로 움직이는지는 vLLM에 알려 주지 않습니다. 이 팔에서 재지 않았기 때문입니다. vLLM은 직전 한 걸음 전후의 두 장을 비교해서 방향을 판단해야 합니다. 이 두뇌 쪽 한계는 엉뚱한 제안을 일찍 멈추는 장치일 뿐이고, 마지막 검사는 여전히 팔 서버가 합니다.
+
+## 검증 상태 (2026-10-28)
 
 - 확인함: 팔 서버의 직렬 프레임 11종이 pymycobot 4.0.7이 실제로 쓰는 바이트와 같고, `get_angles` 응답도 pymycobot과 같은 값으로 읽힘(`arm-server/tests/golden.rs`, pty 녹화). Rust 테스트 28개, Python 테스트 32개(실제 Rust 서버와의 dry-run 연동 포함). aarch64 정적 바이너리가 Spark에서 실행되고 두뇌 CLI와 dry-run으로 연결됨.
 - 확인함 (실제 네트워크, dry-run): Jetson Nano(eth0 `192.168.0.77`, 공유기 NAT 뒤)의 팔 서버가 Spark `:47900`에 접속했습니다. Spark에서 본 접속 주소는 공유기 바깥 주소 `222.111.164.53`이었습니다. status, 5° 이동 수락, 25° 차이 이동 거부가 모두 기대대로 나왔습니다. 요청→응답 왕복은 50회 중앙값 0.88 ms, p90 1.30 ms, 최대 1.70 ms였습니다. 핑을 멈추자 watchdog이 515 ms에 gate를 닫았습니다. 양쪽 로그의 순서가 일치합니다.
-- 확인 안 함: 실제 팔(`--live`), vLLM과의 실제 `ask`(2026-10-27 Spark에 vLLM 컨테이너 없음), 펌웨어가 `get_angles`에 응답하는 시간(`--reply-timeout-ms 50`의 근거 없음), Spark 방화벽 설정(sudo 필요; 47900 접속은 됨).
+- 확인함 (2026-10-28, 한 PC): `camera_push.py --test-pattern`(ffmpeg 시험 화면)이 보낸 640×480 프레임 10장이 모두 PIL로 디코딩됨. `mycobot-brain act --execute`가 실제 Rust dry-run 팔 서버, ffmpeg 카메라, 가짜 vLLM과 함께 두 걸음 이동 후 `done`으로 끝남(`tests/test_e2e_rust.py`). Python 테스트 54개.
+- 확인함 (2026-10-28, Spark): vLLM `qwen3.6`이 이미지 입력을 받음. 320×240 시험 이미지(빨간 원·파란 사각형)를 맞게 묘사했고, 첫 요청 16.4 s, 같은 이미지 반복 시 약 332 ms.
+- 확인 안 함: 실제 팔(`--live`), 실제 카메라 프레임으로 `look`·`act`, 펌웨어가 `get_angles`에 응답하는 시간(`--reply-timeout-ms 50`의 근거 없음), Spark 방화벽 설정(sudo 필요; 47900 접속은 됨).
 
 ## 다음 단계
 
 1. ~~Jetson에서 dry-run으로 Spark 접속 확인~~ (2026-10-27 통과) → `--live`로 상태 읽기만 확인(`move` 없이 `status`).
 2. `get_angles` 응답 시간과 펌웨어의 `send_angles` 응답 여부 측정.
 3. 작은 이동부터 실기 시험. 한계 숫자는 `mycobot-control`의 실측값으로 갱신.
-4. 카메라 JPEG용 두 번째 연결, 동작 완료 보고.
+4. ~~카메라 JPEG용 두 번째 연결~~ (2026-10-28 추가) → 실제 손목 카메라로 `look`, dry-run `act`, 그다음 Hojin이 `--live`로 `act --execute`.
+5. 관절 부호와 화면 이동 방향을 실측해 프롬프트에 넣을지 판단. 동작 완료 보고.

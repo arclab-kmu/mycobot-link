@@ -24,6 +24,12 @@ cd brain
 uv sync --extra dev
 uv run pytest                      # includes test_e2e_rust.py if arm-server/target/debug/mycobot-arm exists
 uv run mycobot-brain status
+uv run mycobot-brain look                      # one camera frame -> vLLM description
+uv run mycobot-brain act "centre the tape roll" # camera -> vLLM -> joint step (--execute to send)
+
+# camera on the Jetson (python3 3.8 + ffmpeg, no venv)
+python3 camera-push/camera_push.py --brain <spark>:47901
+python3 camera-push/camera_push.py --brain 127.0.0.1:47901 --test-pattern   # no camera
 
 # re-record the golden frames after a pymycobot bump (from the repo root)
 uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
@@ -64,7 +70,13 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   (socket loop, reconnect, Ctrl-C).
 - `brain/src/mycobot_brain/`: `link.py` (`ArmLink`: listen, request/reply by
   id, heartbeat thread, latest state), `planner.py` (one vLLM chat completion
-  constrained to the move schema), `cli.py`.
+  constrained to the move schema; `chat()` is the shared POST), `camera.py`
+  (`CameraLink`: second listener, newest JPEG, age measured on this side),
+  `vision.py` (image requests: `describe`, `propose_step` = one bounded joint
+  delta), `act.py` (look → step → settle → look loop; its limits only stop a
+  wandering model early), `cli.py`.
+- `camera-push/camera_push.py`: Jetson, Python 3.8 stdlib + `ffmpeg`. Grabs
+  `/dev/video0` (MJPG), re-encodes every 1/rate-th frame, pushes the newest.
 - `tools/golden_frames.py`: pymycobot over a pty.
 
 ## Relation to other repos
@@ -80,4 +92,5 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
 
 Comments explain *why*. Tests assert behaviour and inject time (`now:
 Instant` in Rust) instead of sleeping where they can. Rust: edition 2024,
-clippy clean, no `unsafe`. Python: stdlib only at runtime, 3.10+.
+clippy clean, no `unsafe`. Python: stdlib only at runtime, 3.10+ for the brain;
+`camera_push.py` must stay 3.8-compatible (the Jetson's python3).

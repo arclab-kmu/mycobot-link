@@ -5,9 +5,14 @@ point MYCOBOT_ARM_BIN at one. Every line the server sends is validated against
 the schema, so this is also the check that both sides speak the same protocol.
 """
 
+import http.server
 import json
 import os
+import shutil
+import socket
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -15,6 +20,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from conftest import SCHEMA_DIR, wait_until
+from mycobot_brain import cli
 from mycobot_brain.link import ArmLink, Rejected
 
 BIN = Path(os.environ.get("MYCOBOT_ARM_BIN", SCHEMA_DIR.parent / "arm-server/target/debug/mycobot-arm"))
@@ -100,3 +106,70 @@ def test_server_reconnects_after_the_brain_drops_it(served):
         link._drop_locked("test")
     assert link.wait_connected(5.0)["server"].startswith("mycobot-arm/")
     assert proc.poll() is None
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class FakeVLLM(http.server.ThreadingHTTPServer):
+    """Answers every chat completion with the next canned step; keeps the requests."""
+
+    def __init__(self, steps):
+        self.steps, self.requests = list(steps), []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                outer.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                body = json.dumps({"choices": [{"message": {"content": json.dumps(outer.steps.pop(0))}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        super().__init__(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_cli_act_drives_the_rust_server_from_camera_frames(tmp_path, capsys):
+    """mycobot-brain act --execute end to end: camera_push (ffmpeg test card) and
+    the Rust dry-run server dial in, a fake vLLM sees real JPEGs and steps twice."""
+    arm_port, cam_port = _free_port(), _free_port()
+    vllm = FakeVLLM([
+        {"seen": "test card", "reason": "pan", "done": False, "delta_deg": [4, 0, 0, 0, 0, 0]},
+        {"seen": "test card", "reason": "tilt", "done": False, "delta_deg": [0, 0, 0, -3, 0, 0]},
+        {"seen": "test card", "reason": "there", "done": True, "delta_deg": [0, 0, 0, 0, 0, 0]},
+    ])
+    procs = [
+        subprocess.Popen([str(BIN), "--brain", f"127.0.0.1:{arm_port}"], stderr=subprocess.DEVNULL),
+        subprocess.Popen([sys.executable, str(SCHEMA_DIR.parent / "camera-push/camera_push.py"),
+                          "--brain", f"127.0.0.1:{cam_port}", "--test-pattern", "--rate", "10"],
+                         stderr=subprocess.DEVNULL),
+    ]
+    try:
+        code = cli.main(["--host", "127.0.0.1", "--port", str(arm_port), "--camera-port", str(cam_port),
+                         "--wait", "15", "act", "look at the card", "--execute", "--settle", "0.3",
+                         "--record", str(tmp_path), "--vllm-url", f"http://127.0.0.1:{vllm.server_port}/v1"])
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait(5)
+        vllm.shutdown()
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0, lines
+    assert lines[0]["live"] is False and lines[1]["server"] == "camera-push"
+    sent = [line["sent"]["angles_deg"] for line in lines if "sent" in line]
+    assert sent == [[4.0, 0, 0, 0, 0, 0], [4.0, 0, 0, -3.0, 0, 0]]  # dry-run arm starts at zero
+    steps = [line for line in lines if "step" in line and "done" in line]
+    assert [s["done"] for s in steps] == [False, False, True]
+    assert steps[2]["angles_deg"] == [4.0, 0, 0, -3.0, 0, 0]
+    images = [p for p in vllm.requests[1]["messages"][1]["content"] if p["type"] == "image_url"]
+    assert len(images) == 2 and all(p["image_url"]["url"].startswith("data:image/jpeg;base64,/9j/") for p in images)
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["step-01.jpg", "step-02.jpg", "step-03.jpg", "steps.jsonl"]

@@ -9,3 +9,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# brain look/act records (frames, steps.jsonl)
+runs/

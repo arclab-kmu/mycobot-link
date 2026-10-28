@@ -89,6 +89,29 @@ def parse_move(content: str) -> Dict[str, Any]:
     return {"angles_deg": [float(a) for a in angles], "speed": speed, "reason": str(move.get("reason", ""))}
 
 
+def chat(
+    request: Dict[str, Any],
+    *,
+    base_url: str = DEFAULT_VLLM_URL,
+    timeout: float = 60.0,
+    opener: Optional[Opener] = None,
+) -> str:
+    """POST one chat completion; return the first choice's text."""
+    body = json.dumps(request).encode()
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/chat/completions", data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with (opener or urllib.request.urlopen)(req, timeout=timeout) as resp:
+            reply = json.load(resp)
+    except OSError as exc:
+        raise PlannerError(f"vLLM at {base_url}: {exc}") from exc
+    try:
+        return reply["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise PlannerError(f"unexpected completion: {str(reply)[:200]}") from exc
+
+
 def propose_move(
     instruction: str,
     angles_deg: list,
@@ -99,17 +122,5 @@ def propose_move(
     opener: Optional[Opener] = None,
 ) -> Dict[str, Any]:
     """One chat completion → ``{"angles_deg", "speed", "reason"}``."""
-    body = json.dumps(build_request(instruction, angles_deg, model)).encode()
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/chat/completions", data=body, headers={"Content-Type": "application/json"}
-    )
-    try:
-        with (opener or urllib.request.urlopen)(req, timeout=timeout) as resp:
-            reply = json.load(resp)
-    except OSError as exc:
-        raise PlannerError(f"vLLM at {base_url}: {exc}") from exc
-    try:
-        content = reply["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise PlannerError(f"unexpected completion: {str(reply)[:200]}") from exc
-    return parse_move(content)
+    request = build_request(instruction, angles_deg, model)
+    return parse_move(chat(request, base_url=base_url, timeout=timeout, opener=opener))
