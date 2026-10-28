@@ -61,6 +61,7 @@ def run(
         for k in range(1, steps + 1):
             frame = camera.wait_frame(after=since, timeout=frame_timeout)
             state = link.wait_state(after_seq=state["seq"])
+            frame_age = frame.age()  # as vLLM gets it, not after it answers
             angles = state["angles_deg"]
             if angles is None:
                 raise LinkError("lost the joint reading")
@@ -69,7 +70,7 @@ def run(
                 instruction, frame.jpeg, angles, previous_jpeg=previous, history=history, step=k, steps=steps,
                 max_step=max_step, locked=locked, camera=camera_kind,
             )
-            report = {"step": k, "frame_seq": frame.seq, "frame_age_s": round(frame.age(), 3),
+            report = {"step": k, "frame_seq": frame.seq, "frame_age_s": round(frame_age, 3),
                       "angles_deg": angles, "vllm_s": round(time.monotonic() - t0, 3), **proposal}
             if record is not None:
                 (record / f"step-{k:02d}.jpg").write_bytes(frame.jpeg)

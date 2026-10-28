@@ -107,3 +107,13 @@ def test_step_limit_ends_without_done(link, camera, teleporting):
     act.run(link, camera, "x", propose=script, emit=out.append, execute=True, settle=0.05, steps=2)
     assert out[-1] == {"done": False, "why": "no done after 2 steps"}
     assert wait_until(lambda: len(sent(teleporting, "disable")) == 1)
+
+
+def test_frame_age_is_taken_before_vllm_answers(link, camera, teleporting):
+    def slow(*a, **kw):
+        time.sleep(0.4)
+        return {"seen": "x", "reason": "x", "done": True, "delta_deg": [0.0] * 6}
+
+    out = []
+    act.run(link, camera, "x", propose=slow, emit=out.append)
+    assert out[0]["vllm_s"] >= 0.4 and out[0]["frame_age_s"] < 0.2
