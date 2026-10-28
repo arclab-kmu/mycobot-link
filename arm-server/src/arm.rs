@@ -158,6 +158,15 @@ impl SerialArm {
     }
 }
 
+/// Last line of defence: however the process ends (a panic unwinding
+/// included), the arm gets one more stop frame. After a clean shutdown that
+/// is a second, harmless stop.
+impl Drop for SerialArm {
+    fn drop(&mut self) {
+        let _ = self.write(&frame::stop());
+    }
+}
+
 impl Arm for SerialArm {
     fn read_angles(&mut self) -> io::Result<Option<[f64; 6]>> {
         Ok(self

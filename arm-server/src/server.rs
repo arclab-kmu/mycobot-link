@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use crate::arm::Arm;
+use crate::log;
 use crate::protocol::{Event, PROTOCOL_VERSION, Request, parse_request};
 use crate::safety;
 
@@ -186,7 +187,7 @@ impl<A: Arm> Server<A> {
             Ok(None) => self.last_read_ok = false,
             Err(e) => {
                 self.last_read_ok = false;
-                eprintln!("[mycobot-arm] read_angles failed: {e}");
+                log(format!("read_angles failed: {e}"));
             }
         }
     }
@@ -218,7 +219,7 @@ impl<A: Arm> Server<A> {
         if !self.gate_open {
             self.gate_open = true;
             self.gate_reason = "enabled by brain".into();
-            eprintln!("[mycobot-arm] gate OPEN (enabled by brain)");
+            log("gate OPEN (enabled by brain)");
         }
         Event::ok(id)
     }
@@ -274,14 +275,14 @@ impl<A: Arm> Server<A> {
     /// in a loop that could starve the rest of the server.
     fn halt(&mut self, why: &str) {
         if let Err(e) = self.arm.stop() {
-            eprintln!("[mycobot-arm] stop() failed: {e}");
+            log(format!("stop() failed: {e}"));
         }
         self.close_gate(why);
     }
 
     fn close_gate(&mut self, why: &str) {
         if self.gate_open {
-            eprintln!("[mycobot-arm] gate CLOSED ({why})");
+            log(format!("gate CLOSED ({why})"));
         }
         self.gate_open = false;
         self.gate_reason = why.into();

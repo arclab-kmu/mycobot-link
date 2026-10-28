@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -173,3 +174,21 @@ def test_cli_act_drives_the_rust_server_from_camera_frames(tmp_path, capsys):
     images = [p for p in vllm.requests[1]["messages"][1]["content"] if p["type"] == "image_url"]
     assert len(images) == 2 and all(p["image_url"]["url"].startswith("data:image/jpeg;base64,/9j/") for p in images)
     assert sorted(f.name for f in tmp_path.iterdir()) == ["step-01.jpg", "step-02.jpg", "step-03.jpg", "steps.jsonl"]
+
+
+def test_a_closed_stderr_does_not_kill_the_server():
+    """`mycobot-arm … | tee log` + Ctrl-C kills tee first. The server used to
+    panic (exit 101) on its next log line, the "session ended" one, before
+    on_disconnect could send stop(). Logging must not be able to stop that."""
+    link = ArmLink("127.0.0.1", 0, ping_interval=0.05).start()
+    proc = subprocess.Popen([str(BIN), "--brain", f"127.0.0.1:{link.port}"], stderr=subprocess.PIPE)
+    try:
+        link.wait_connected(10.0)
+        proc.stderr.close()  # the reader is gone
+        link.close()  # the session ends and the server logs it
+        time.sleep(0.5)
+        assert proc.poll() is None, f"server died with {proc.returncode}"
+        proc.send_signal(signal.SIGINT)
+        assert proc.wait(5) == 0
+    finally:
+        proc.kill()

@@ -10,6 +10,7 @@
 //! - [`arm`]: the [`arm::Arm`] trait, a dry-run arm and the serial arm.
 //! - [`server`]: gate, watchdog and request handling, with time passed in.
 //! - [`lines`]: newline framing for the TCP stream.
+//! - [`log`]: stderr lines that can never take the process down.
 
 pub mod arm;
 pub mod frame;
@@ -17,3 +18,13 @@ pub mod lines;
 pub mod protocol;
 pub mod safety;
 pub mod server;
+
+/// One `[mycobot-arm]` line on stderr; a write error is dropped.
+///
+/// Not `eprintln!`: it panics when stderr is a closed pipe, and with
+/// `mycobot-arm … | tee log` a Ctrl-C kills `tee` first. The panic then came
+/// from the "session ended" line, before `on_disconnect` could send `stop()`.
+pub fn log(msg: impl AsRef<str>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "[mycobot-arm] {}", msg.as_ref());
+}

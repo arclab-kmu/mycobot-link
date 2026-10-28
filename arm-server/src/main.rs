@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use mycobot_arm::arm::{Arm, DryRunArm, SerialArm};
 use mycobot_arm::lines::LineBuffer;
+use mycobot_arm::log;
 use mycobot_arm::protocol::Event;
 use mycobot_arm::safety;
 use mycobot_arm::server::{Config, Server};
@@ -55,10 +56,6 @@ struct Args {
 
     #[arg(long, default_value_t = safety::FAST_SPEED)]
     max_speed: u32,
-}
-
-fn log(msg: impl AsRef<str>) {
-    eprintln!("[mycobot-arm] {}", msg.as_ref());
 }
 
 fn confirm_live(args: &Args) -> Result<(), String> {
@@ -153,8 +150,9 @@ fn serve<A: Arm>(args: &Args, arm: A, quit: &AtomicBool) {
                     Ok(why) => why,
                     Err(e) => e.to_string(),
                 };
-                log(format!("session ended: {why}"));
+                // stop() first: nothing that can go wrong in logging may delay it.
                 server.on_disconnect(&why);
+                log(format!("session ended: {why}"));
             }
             Err(e) => log(format!("connect {addr}: {e}")),
         }
