@@ -116,6 +116,17 @@ uv run mycobot-brain act "흰 테이프 롤이 화면 가운데 오게 해" --ex
 
 관절 부호가 화면을 어느 쪽으로 움직이는지는 vLLM에 알려 주지 않습니다. 이 팔에서 재지 않았기 때문입니다. vLLM은 직전 한 걸음 전후의 두 장을 비교해서 방향을 판단해야 합니다. 이 두뇌 쪽 한계는 엉뚱한 제안을 일찍 멈추는 장치일 뿐이고, 마지막 검사는 여전히 팔 서버가 합니다.
 
+## 시뮬레이션으로 시험 (`sim/`)
+
+진짜 팔이 없을 때는 팔 서버 **뒤쪽만** 바꿉니다. `sim/fw_emu.py`가 pty를 만들어 Atom 펌웨어처럼 직렬 프레임에 답하고(`get_angles`는 시뮬레이션 `state`에서, `send_angles`·그리퍼·`stop`은 sim-bridge로), 팔 서버는 그 pty를 `--live --serial`로 엽니다. 프로토콜과 Rust 바이너리는 그대로라서 20° 검사와 watchdog도 그대로 돕니다. `sim/cam_push_sim.py`는 시뮬레이션의 손목 카메라 프레임을 `camera_push.py`와 같은 틀로 보냅니다.
+
+```bash
+sim/run_sim_link.sh --stub     # Isaac Lab 없이 sim/stub_sim.py로. 빼면 127.0.0.1:47950의 진짜 sim-bridge
+python3 -m unittest discover -s sim/tests
+```
+
+가정(speed → °/s, 그리퍼 방향)과 sim-bridge에 바라는 것, 확인하지 못한 것은 [`schema/SIM.md`](schema/SIM.md)에 있습니다.
+
 ## 검증 상태 (2026-10-28)
 
 - 확인함: 팔 서버의 직렬 프레임 11종이 pymycobot 4.0.7이 실제로 쓰는 바이트와 같고, `get_angles` 응답도 pymycobot과 같은 값으로 읽힘(`arm-server/tests/golden.rs`, pty 녹화). Rust 테스트 28개, Python 테스트 32개(실제 Rust 서버와의 dry-run 연동 포함). aarch64 정적 바이너리가 Spark에서 실행되고 두뇌 CLI와 dry-run으로 연결됨.
