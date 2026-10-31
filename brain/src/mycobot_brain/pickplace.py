@@ -189,7 +189,7 @@ class PickPlace:
 
         self._place(instruction, box, lift_z)
         self._phase("final check")
-        self._goto(c.look_pose_deg, "look", floor=c.box_rim_z + c.block_edge)
+        self._goto(c.look_pose_deg, "look", floor=c.box_rim_z + 0.01)  # empty gripper: only clear the rim
         final = self._check(grounding.final_question(pick_label, place_label),
                             [("At the start:", frame0.jpeg)], "final")
         return {"ok": final["ok"], "why": final["seen"], "attempts": attempt}
