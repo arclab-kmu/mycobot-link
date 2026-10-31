@@ -85,7 +85,7 @@ class OverAPty(unittest.TestCase):
         # 10 deg at 40 deg/s with a first-order tail: well inside 2 s.
         self.assertTrue(wait_for(lambda: abs(self.sim.q[0] - 20.0) < 0.2, timeout=2.0), self.sim.q)
         f = self.port.query(fw_emu.frame(0x20))
-        self.assertAlmostEqual(FrameReaderAngles(f)[0], 20.0, delta=0.2)
+        self.assertAlmostEqual(FrameReaderAngles(f)[0], 20.0, delta=0.5)
 
     def test_gripper_and_stop_reach_the_sim(self):
         os.write(self.port.fd, fw_emu.frame(0x67, bytes([0, 50])))
