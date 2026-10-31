@@ -94,6 +94,6 @@ class SceneVLM:
                 reply["next"] = self.next
             return json.dumps(reply)
         question = request["messages"][1]["content"][-1]["text"]
-        answers = self.held if "held" in question else self.final
+        answers = self.final if "inside" in question else self.held
         ok = answers.pop(0) if len(answers) > 1 else answers[0]
         return json.dumps({"seen": "the gripper camera view", "ok": ok})

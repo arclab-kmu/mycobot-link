@@ -245,3 +245,13 @@ def test_sim_calib_near_the_base_tips_the_fingers_in_and_keeps_them_off_the_tabl
     assert math.dist(grasp[:2], block[:2]) < 0.002
     assert grasp[2] == pytest.approx(0.0114 + 0.004, abs=0.0005)  # pads 4 mm over the table, not at the block centre
     assert math.dist(tcp(at_gripper(teleporting, 3), sim)[:2], box[:2]) < 0.002
+
+
+def test_the_held_check_looks_from_where_the_close_look_was(link, camera, teleporting, tmp_path):
+    sim = calib.load(Path(__file__).parent / "data" / "sim_calib.json")
+    vlm = scene.SceneVLM(sim, lambda: where(teleporting), block=(0.2, 0.05, 0.0125), box=(0.19, -0.04, 0.045))
+    run(link, camera, teleporting, tmp_path, vlm=vlm, calib=sim)
+    requests = {e["purpose"]: e for e in events(tmp_path) if e["event"] == "vlm_request"}
+    assert requests["held"]["angles_deg"] == pytest.approx(requests["close-pick"]["angles_deg"], abs=0.01)
+    assert "same camera position" in requests["held"]["prompt"]
+    assert "at the left edge of the image" in requests["held"]["prompt"]  # the sim camera sits beside the fingers

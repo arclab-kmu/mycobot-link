@@ -175,10 +175,17 @@ class PickPlace:
         attempt = 0
         while True:
             attempt += 1
-            block, before = self._grasp(instruction, block, lift_z)
+            block, before, view = self._grasp(instruction, block, lift_z)
             self._phase("check held")
-            check = self._check(grounding.held_question(pick_label), [("Before the grasp:", before or frame0.jpeg)],
-                                "held")
+            if view is not None:
+                # Back to the close look: same view as before, so a block still
+                # on the table is where it was and a held one is gone. The wrist
+                # camera sees the fingers only at the image edge, behind the linkage.
+                self._goto(view, "look: held", floor=c.table_z + c.block_edge + 0.02)
+                question = grounding.held_question_same_view(pick_label, self._gripper_side())
+            else:
+                question = grounding.held_question(pick_label)
+            check = self._check(question, [("Before the grasp:", before or frame0.jpeg)], "held")
             if check["ok"]:
                 break
             self._gripper(c.gripper_open, "open")
@@ -199,18 +206,20 @@ class PickPlace:
                             [("At the start:", frame0.jpeg)], "final")
         return {"ok": final["ok"], "why": final["seen"], "attempts": attempt}
 
-    def _grasp(self, instruction: str, block: Vec, lift_z: float) -> Tuple[Vec, Optional[bytes]]:
-        """Refine, descend, close, lift. Returns the block estimate used and the close-up image."""
+    def _grasp(self, instruction: str, block: Vec,
+               lift_z: float) -> Tuple[Vec, Optional[bytes], Optional[List[float]]]:
+        """Refine, descend, close, lift. Returns the block estimate used, the
+        close-up image and the angles it was taken at (None without a close look)."""
         s, c = self.s, self.calib
         clear = c.table_z + c.block_edge + 0.02
-        before = None
+        before = view = None
         if s.refine:
             self._phase("close look: pick")
             q = self._camera_over(block, c.block_plane_z, min_tcp_z=clear)
             if q is not None:
                 self._goto(q, "close look: pick", floor=clear)
                 found, frame, qa = self._locate(instruction, ("pick",), "close-pick", with_next=False)
-                before = frame.jpeg
+                before, view = frame.jpeg, qa
                 if found["pick"]["visible"]:
                     block = self._estimate(found["pick"], qa, c.block_plane_z, "pick", "close")
         self._phase("pre-grasp")
@@ -225,7 +234,7 @@ class PickPlace:
         self._gripper(c.gripper_closed, "close")
         self._phase("lift")
         self._line((block[0], block[1], lift_z), "lift", approach)
-        return block, before
+        return block, before, view
 
     def _place(self, instruction: str, box: Vec, lift_z: float) -> None:
         s, c = self.s, self.calib
@@ -287,6 +296,16 @@ class PickPlace:
         raw = self._ask(purpose, request, [frame.jpeg], angles)
         found = self._reply(purpose, raw, lambda r: grounding.parse_locate(r, **opts))
         return found, frame, angles
+
+    def _gripper_side(self) -> str:
+        """Where in the image the grasp point is, in words: the camera is off the gripper axis."""
+        chain, k = self.calib.chain, self.calib.camera
+        x, y, z = kinematics.apply(kinematics.inverse(chain.tools["camera"]),
+                                   kinematics.position(chain.tools["tcp"]))
+        u, v = k.cx + k.fx * x / z, k.cy + k.fy * y / z
+        horiz = "left" if u < k.width / 3 else "right" if u > 2 * k.width / 3 else ""
+        vert = "top" if v < k.height / 3 else "bottom" if v > 2 * k.height / 3 else ""
+        return f"{vert} {horiz}".strip() or "centre"
 
     def _check(self, question: str, before: Sequence[Tuple[str, bytes]], purpose: str) -> Dict[str, Any]:
         frame, angles = self._look()

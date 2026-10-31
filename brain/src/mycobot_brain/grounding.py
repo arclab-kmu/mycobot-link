@@ -232,6 +232,14 @@ def held_question(pick_label: str) -> str:
             f"Is the {pick_label} now held between the gripper fingers, lifted off the table?")
 
 
+def held_question_same_view(pick_label: str, gripper_side: str) -> str:
+    return (f"Both images are from the same camera position, above where the {pick_label} was lying. "
+            f"Between them the gripper went down, closed on the {pick_label} and lifted. "
+            f"The gripper fingers are at the {gripper_side} edge of the image. "
+            f"Is the {pick_label} gone from the table now, so the gripper is holding it? "
+            f"ok is false if the {pick_label} still lies on the table.")
+
+
 def final_question(pick_label: str, place_label: str) -> str:
     return f"Is the {pick_label} now inside the {place_label}?"
 
