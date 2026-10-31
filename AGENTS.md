@@ -26,6 +26,7 @@ uv run pytest                      # includes test_e2e_rust.py if arm-server/tar
 uv run mycobot-brain status
 uv run mycobot-brain look                      # one camera frame -> vLLM description
 uv run mycobot-brain act "centre the tape roll" # camera -> vLLM -> joint step (--execute to send)
+uv run mycobot-brain pick-place "빨간 블록을 잡아서 갈색 상자 안에 넣어" --calib sim_calib.json  # --execute to move
 
 # camera on the Jetson (python3 3.8 + ffmpeg, no venv)
 python3 camera-push/camera_push.py --brain <spark>:47901
@@ -74,7 +75,11 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   (`CameraLink`: second listener, newest JPEG, age measured on this side),
   `vision.py` (image requests: `describe`, `propose_step` = one bounded joint
   delta), `act.py` (look → step → settle → look loop; its limits only stop a
-  wandering model early), `cli.py`.
+  wandering model early), `kinematics.py` (FK/IK in firmware degrees, pixel →
+  ray → known plane; no depth image), `calib.py` (scene geometry file),
+  `grounding.py` (VLM locate/check requests, 0-1000 or pixel coordinates),
+  `pickplace.py` (look → locate → close look → grasp → check → place → check,
+  logged to `events.jsonl`), `cli.py`.
 - `camera-push/camera_push.py`: Jetson, Python 3.8 stdlib + `ffmpeg`. Grabs
   `/dev/video0` (MJPG), re-encodes every 1/rate-th frame, pushes the newest.
 - `tools/golden_frames.py`: pymycobot over a pty.

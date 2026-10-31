@@ -7,6 +7,7 @@ the schema, so this is also the check that both sides speak the same protocol.
 
 import http.server
 import json
+import math
 import os
 import shutil
 import signal
@@ -192,3 +193,97 @@ def test_a_closed_stderr_does_not_kill_the_server():
         assert proc.wait(5) == 0
     finally:
         proc.kill()
+
+
+class AnsweringVLLM(http.server.ThreadingHTTPServer):
+    """Answers each chat completion with ``answer(request)``, after ``delay`` seconds."""
+
+    def __init__(self, answer, delay=0.0):
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                time.sleep(delay)
+                body = json.dumps({"choices": [{"message": {"content": answer(request)}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        super().__init__(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+
+def _camera_when_bound(port, stop):
+    """FakeCamera once the brain listens (cli.main binds it); frames until ``stop``."""
+    from test_camera import FakeCamera
+
+    end = time.monotonic() + 15
+    while not stop.is_set() and time.monotonic() < end:
+        try:
+            cam = FakeCamera(port)
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        return
+    n = 0
+    while not stop.is_set():
+        n += 1
+        try:
+            cam.send(n)
+        except OSError:
+            return
+        time.sleep(0.05)
+    cam.close()
+
+
+def test_cli_pick_place_runs_a_whole_pick_on_the_rust_server(tmp_path, capsys):
+    """mycobot-brain pick-place --execute: the Rust dry-run server takes every
+    waypoint, a fake vLLM that sees the scene answers each look 0.8 s later
+    (over the 300 ms watchdog, so the heartbeat has to hold the gate), and the
+    block is grasped at its centre and released over the box."""
+    import scene
+
+    arm_port, cam_port = _free_port(), _free_port()
+    run_dir = tmp_path / "run"
+
+    def angles():  # where the brain says the camera was for this request
+        lines = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+        return [e for e in lines if e["event"] == "vlm_request"][-1]["angles_deg"]
+
+    vllm = AnsweringVLLM(scene.SceneVLM(scene.load(), angles), delay=0.8)
+    server = subprocess.Popen([str(BIN), "--brain", f"127.0.0.1:{arm_port}", "--watchdog-ms", "300",
+                               "--state-hz", "50"], stderr=subprocess.PIPE, text=True)
+    stop = threading.Event()
+    threading.Thread(target=_camera_when_bound, args=(cam_port, stop), daemon=True).start()
+    try:
+        code = cli.main(["--host", "127.0.0.1", "--port", str(arm_port), "--camera-port", str(cam_port),
+                         "--wait", "15", "pick-place", "빨간 블록을 잡아서 갈색 상자 안에 넣어",
+                         "--calib", str(scene.write(tmp_path / "calib.json")), "--execute", "--record", str(run_dir),
+                         "--settle", "0.1", "--gripper-wait", "0.1",
+                         "--vllm-url", f"http://127.0.0.1:{vllm.server_port}/v1"])
+    finally:
+        stop.set()
+        server.terminate()
+        _, err = server.communicate(timeout=5)
+        vllm.shutdown()
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0, (lines[-3:], err[-2000:])
+    assert lines[0]["live"] is False
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+    assert events[-1]["event"] == "result" and events[-1]["ok"] is True
+    replies = [e for e in events if e["event"] == "vlm_reply"]
+    assert len(replies) == 5 and all(r["latency_s"] >= 0.8 for r in replies)
+    moves_and_grips = [e for e in events if e["event"] in ("move", "gripper")]
+    grips = [i for i, e in enumerate(moves_and_grips) if e["event"] == "gripper"]
+    assert [moves_and_grips[i]["action"] for i in grips] == ["open", "close", "open"]
+    grasp, release = moves_and_grips[grips[1] - 1], moves_and_grips[grips[2] - 1]
+    assert grasp["phase"] == "descend" and release["phase"] == "lower"
+    assert math.dist(grasp["tcp_xyz"], scene.BLOCK) < 0.002
+    assert math.dist(release["tcp_xyz"][:2], scene.BOX[:2]) < 0.002
+    assert "watchdog: no line from the brain" not in err
