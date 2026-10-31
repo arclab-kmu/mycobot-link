@@ -42,34 +42,23 @@ def _mime(data: bytes) -> str:
 
 
 def frames_from_truth(truth: Any, ground: Path) -> List[Dict[str, Any]]:
-    """Normalise truth.json to [{image, kind, angles_deg, objects: {block|box: {pixel?, xyz?}}}].
+    """sim-scene's truth.json → [{image, kind, angles_deg, objects: {block|box: {pixel, xyz, visible}}}].
 
-    TODO(unverified): written before the first truth.json existed; extend
-    here, not in the scorer, when its layout differs.
+    The block's truth pixel is its 3D centroid (``center_px``), the box's the
+    centre at rim height (``rim_center_px``): the points pick-place puts on
+    its two planes. ``pos_m`` is the block centre and the box's outer bottom
+    centre; only x, y of it are compared.
     """
-    rows = truth.get("frames", truth) if isinstance(truth, dict) else truth
-    if isinstance(rows, dict):
-        rows = [dict(v, image=k) if "image" not in v else v for k, v in rows.items()]
     out = []
-    for r in rows:
+    for r in truth["frames"]:
         objects = {}
-        for name in ("block", "box"):
-            o = r.get(name) or (r.get("objects") or {}).get(name)
-            if not o:
-                continue
-            pixel = o.get("pixel") or o.get("center_px") or o.get("px") or o.get("uv")
-            if pixel is None and o.get("bbox_px"):
-                b = o["bbox_px"]
-                pixel = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]
-            objects[name] = {
-                "pixel": [float(p) for p in pixel] if pixel is not None else None,
-                "xyz": [float(x) for x in o["xyz"]] if o.get("xyz") is not None else None,
-                "visible": bool(o.get("visible", o.get("in_view", True))),
-            }
-        image = ground / (r.get("image") or r.get("file") or r["name"])
-        out.append({"image": image, "kind": r.get("kind", "close" if "close" in image.name else "look"),
-                    "angles_deg": r.get("angles_deg") or r.get("joint_deg") or r.get("q_deg"),
-                    "objects": objects})
+        for name, key, px in (("block", "red_block", "center_px"), ("box", "brown_box", "rim_center_px")):
+            o = r.get(key)
+            if o:
+                objects[name] = {"pixel": [float(v) for v in o[px]], "xyz": [float(v) for v in o["pos_m"]],
+                                 "visible": bool(o.get("in_image", True))}
+        out.append({"image": ground / r["file"], "kind": "look" if r["kind"] == "look" else "close",
+                    "sub": r["kind"], "angles_deg": r["angles_deg"], "objects": objects})
     return out
 
 
@@ -182,7 +171,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     rows = []
     with concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
         for (f, v), answer in zip(jobs, pool.map(lambda job: ask(job[0], job[1], scene.camera, chat), jobs)):
-            rows.append({"image": f["image"].name, "kind": f["kind"], **answer, "score": score(f, answer, scene)})
+            rows.append({"image": f["image"].name, "kind": f["kind"], "sub": f["sub"], **answer,
+                         "score": score(f, answer, scene)})
     with open(out / "answers.jsonl", "w") as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")

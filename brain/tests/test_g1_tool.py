@@ -22,18 +22,18 @@ def ground(tmp_path):
         q[0] += i  # three slightly different looks
         name = f"look_{i:02d}.jpg"
         (tmp_path / name).write_bytes(b"\xff\xd8" + bytes([i]) + b"\xff\xd9")
-        frames.append({"image": name, "kind": "look", "angles_deg": q,
-                       "block": {"pixel": list(kinematics.project(c.chain, c.camera, q, scene.BLOCK)),
-                                 "xyz": list(scene.BLOCK)},
-                       "box": {"pixel": list(kinematics.project(c.chain, c.camera, q, scene.BOX)),
-                               "xyz": list(scene.BOX)}})
+        frames.append({"file": name, "kind": "look", "angles_deg": q,
+                       "red_block": {"center_px": list(kinematics.project(c.chain, c.camera, q, scene.BLOCK)),
+                                     "pos_m": list(scene.BLOCK), "in_image": True},
+                       "brown_box": {"rim_center_px": list(kinematics.project(c.chain, c.camera, q, scene.BOX)),
+                                     "pos_m": [*scene.BOX[:2], 0.0], "in_image": True}})
     (tmp_path / "truth.json").write_text(json.dumps({"frames": frames}))
     return tmp_path, frames
 
 
 def test_errors_are_measured_in_pixels_and_on_the_plane(tmp_path, monkeypatch, capsys):
     g, frames = ground(tmp_path)
-    by_image = {f["image"]: f for f in frames}
+    by_image = {f["file"]: f for f in frames}
 
     def fake_chat(request, base_url):
         jpeg = g1.base64.b64decode(request["messages"][1]["content"][0]["image_url"]["url"].split(",")[1])

@@ -523,16 +523,16 @@
     },
     "box_center": {
       "x": [
-        0.16,
+        0.17,
         0.22
       ],
       "y": [
-        -0.06,
-        0.06
+        -0.05,
+        0.05
       ],
       "r": [
-        0.16,
-        0.22
+        0.17,
+        0.225
       ]
     },
     "note": "sampling zones of the simulator's reset; the arm reaches a top-down grasp at r 0.12-0.24 m"
@@ -543,7 +543,7 @@
     "mapping": "set_gripper_value: 100 = open 45.6 mm, 0 = closed 19.4 mm, linear in finger travel; the 25 mm block stops the jaw near value 21",
     "full_travel_s": "50 / speed (1.0 s at speed 50)"
   },
-  "speed_map": "move_joints: the slowest-arriving joint moves at 1.2 * speed deg/s (120 deg/s at 100, spec sheet), all joints interpolated linearly to arrive together",
+  "speed_map": "move_joints: the slowest-arriving joint moves at speed deg/s (mycobot-link schema/SIM.md), all joints interpolated linearly to arrive together",
   "fk_check": [
     {
       "angles_deg": [
