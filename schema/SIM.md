@@ -79,11 +79,29 @@ CONTRACT.md의 sim-bridge v0 그대로(`state`, `move_joints`, `gripper`, `stop`
 
 ## 확인한 것, 못 한 것
 
-확인(2026-10-31, 이 PC와 Spark, 가짜 sim): 골든 바이트 일치, pymycobot 4.0.7이 `get_angles`/`get_gripper_value`/`is_power_on`/`get_error_information` 응답을 제대로 읽음, 한 PC e2e와 네트워크 너머 G2(결과는 `BOARD.md`와 커밋 메시지).
+확인(2026-11-01, rtx5090 + Spark). 두뇌는 Spark의 `ArmLink`/`CameraLink`, 팔 서버는 rtx5090에서 `--live --serial <fw_emu pty>`다. 아래는 같은 `sim/g2_check.py`를 가짜 sim과 진짜 sim-bridge(sim-scene, 실시간)에 한 번씩 돌린 결과다.
+
+| | 가짜 sim(`stub_sim.py`) | 진짜 sim-bridge |
+| --- | --- | --- |
+| 단계 | 10/10 | 10/10 |
+| 요청→응답 (`enable`+`disable`, 20쌍, 네트워크 너머) | 중앙값 0.49 ms, 최대 1.23 ms | 중앙값 0.71 ms, 최대 1.52 ms |
+| `state` | 10.7 Hz, 간격 중앙값 100 ms | 10.7 Hz, 100 ms |
+| J1 +10°, speed 20 (0.2 s마다 측정값) | 0 → 3.8 → 7.7 → 9.7 → 10.0 | 25.8 → 27.7 → 31.4 → 34.9 → 35.7 → 35.8 |
+| 25° 점프 | 거부 "J1 is 25.0 deg from the measured angle (max 20.0)", 측정값 그대로 | 같음 |
+| 그리퍼 0 → 100 | 요청 수락, `fw_emu` 로그에 프레임 두 개 | 수락. sim 값 100 → 0 약 1.2 s, 0 → 100 약 1.2 s (speed 50) |
+| 그리퍼 101 | 거부 | 거부 |
+| watchdog | 핑을 끊고 499 ms에 gate 닫힘, 팔은 12° 이동 계획의 1.8°에서 멈춤 | 500 ms, 23.79까지 가는 중 28.4°에서 멈춤 |
+| 멈춘 뒤 이동 | `gate closed: watchdog…`로 거부, `enable` 뒤에 다시 가능 | 같음 |
+| 카메라 (`cam_push_sim` → Spark `:47901`) | 프레임 도착 | 25장/5.0 s = 5.0 Hz, 도착 시 나이 최대 0.7 ms, JPEG 21.7 KB |
+
+- 측정값이 35.8이 아니라 35.79로 끝나는 것은 `35.8 × 100`이 3579.99…라서 pymycobot처럼 버림되기 때문이다(`frame.rs`와 같다).
+- 처음 진짜 sim-bridge에 돌렸을 때는 `moving`이 numpy bool이라 첫 `move_joints` 뒤의 `state` 응답을 JSON으로 쓰다가 연결이 끊겼고, fw_emu가 말을 멈추자 팔 서버가 gate를 닫았다(`joint reading stale while the gate was open`). sim 쪽 수정 뒤 통과했다. 시뮬레이션이 죽으면 체인이 멈추는 쪽으로 실패한다는 뜻이다.
+- 골든 바이트 일치, pymycobot 4.0.7이 `get_angles`/`get_gripper_value`/`is_power_on`/`get_error_information` 응답을 제대로 읽음, 한 PC e2e 8개.
 
 TODO(unverified):
 
 - 진짜 Atom 펌웨어가 명령에 응답 프레임을 보내는지, `get_gripper_value`/`is_power_on`/`get_error_information` 응답의 정확한 모양. pymycobot이 읽는 모양으로 답하게 했을 뿐이다.
-- 위의 speed → °/s와 그리퍼 방향.
+- 위의 speed → °/s와 그리퍼 방향. 시뮬레이션 쪽은 이 표대로 구현되어 있어서 위 숫자는 그 가정이 일관되다는 것만 보여 준다.
 - pty에는 1 Mbaud의 시간 특성이 없다. 진짜 UART에서의 `get_angles` 지연(팔 서버 기본 50 ms)은 이 시험으로 알 수 없다.
 - 이 시험은 Atom의 오류 상태(충돌 보호, 한계 초과)를 흉내 내지 않는다.
+- `stop` 뒤에 진짜 sim의 팔이 약간 처진다(J2 -14.95 → -15.89 등). 측정값 유지가 중력을 이기지 못하는 정도인지는 sim 쪽에서 볼 일이다.
