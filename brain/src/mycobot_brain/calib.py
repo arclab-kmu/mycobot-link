@@ -31,6 +31,8 @@ class Calib:
     look_pose_deg: List[float]
     gripper_open: int
     gripper_closed: int
+    #: how far the finger pads reach past the TCP along the approach axis.
+    pad_below_tcp: float = 0.0
     source: str = ""
 
     @property
@@ -44,9 +46,11 @@ def _tf(spec: Any, what: str) -> Mat:
     if isinstance(spec, list) and len(spec) == 4 and all(isinstance(r, list) and len(r) == 4 for r in spec):
         return [[float(x) for x in row] for row in spec]
     if isinstance(spec, dict):
-        xyz = spec.get("xyz", spec.get("pos", spec.get("translation", (0.0, 0.0, 0.0))))
-        if "rpy" in spec:
-            return transform(rpy_matrix(*spec["rpy"]), xyz)
+        if "matrix" in spec:
+            return _tf(spec["matrix"], what)
+        xyz = spec.get("xyz", spec.get("xyz_m", spec.get("origin_xyz_m", spec.get("pos", (0.0, 0.0, 0.0)))))
+        if "rpy" in spec or "origin_rpy_rad" in spec:
+            return transform(rpy_matrix(*spec.get("rpy", spec.get("origin_rpy_rad"))), xyz)
         if "rpy_deg" in spec:
             return transform(rpy_matrix(*(math.radians(a) for a in spec["rpy_deg"])), xyz)
         if "quat_xyzw" in spec:
@@ -54,8 +58,6 @@ def _tf(spec: Any, what: str) -> Mat:
         if "quat_wxyz" in spec:
             w, x, y, z = spec["quat_wxyz"]
             return transform(quat_matrix(x, y, z, w), xyz)
-        if "matrix" in spec:
-            return _tf(spec["matrix"], what)
         return transform(None, xyz)
     raise CalibError(f"{what}: cannot read a transform from {str(spec)[:120]}")
 
@@ -68,8 +70,11 @@ def _need(d: Dict[str, Any], *keys: str) -> Any:
 
 
 def chain_from(spec: Dict[str, Any]) -> Chain:
+    """``{"joints", "flange_to_camera", "flange_to_tcp"}`` or the sim calib's top level
+    (``arm_joints``, ``flange_T_camera_optical``, ``flange_T_tcp``)."""
     joints = []
-    for i, j in enumerate(_need(spec, "joints")):
+    rows = sorted(_need(spec, "joints", "arm_joints"), key=lambda j: j.get("firmware_index", 0))
+    for i, j in enumerate(rows):
         joints.append(Joint(
             origin=_tf(j.get("origin", j), f"joint {i + 1}"),
             axis=tuple(float(a) for a in j.get("axis", (0, 0, 1))),  # type: ignore[arg-type]
@@ -78,8 +83,8 @@ def chain_from(spec: Dict[str, Any]) -> Chain:
         ))
     if len(joints) != 6:
         raise CalibError(f"need 6 joints, got {len(joints)}")
-    tools = {"camera": _tf(_need(spec, "flange_to_camera", "camera"), "flange_to_camera"),
-             "tcp": _tf(_need(spec, "flange_to_tcp", "tcp"), "flange_to_tcp")}
+    tools = {"camera": _tf(_need(spec, "flange_to_camera", "flange_T_camera_optical"), "flange_to_camera"),
+             "tcp": _tf(_need(spec, "flange_to_tcp", "flange_T_tcp"), "flange_to_tcp")}
     return Chain(joints=joints, base=_tf(spec.get("base", {}), "base"),
                  flange=_tf(spec.get("flange", spec.get("joint6_to_flange", {})), "flange"), tools=tools)
 
@@ -99,16 +104,19 @@ def from_dict(d: Dict[str, Any], source: str = "") -> Calib:
         box = d.get("box", {})
         gripper = d.get("gripper", {})
         table_z = float(_need(d, "table_z_m", "table_z"))
+        block_edge = d["block"]["edge_m"] if "block" in d else _need(d, "block_edge_m", "block_edge")
+        pads = (d.get("tcp") or {}).get("pad_extent_along_tool_z_m")
         calib = Calib(
-            chain=chain_from(_need(d, "chain", "kinematics")),
+            chain=chain_from(d["chain"] if "chain" in d else d),
             camera=intrinsics_from(_need(d, "camera", "intrinsics")),
             table_z=table_z,
-            block_edge=float(_need(d, "block_edge_m", "block_edge")),
+            block_edge=float(block_edge),
             box_size=[float(x) for x in _need(box, "size_m", "outer_m", "size")],
             box_rim_z=float(box["rim_z_m"]) if "rim_z_m" in box else table_z + float(_need(box, "rim_height_m", "height_m")),
             look_pose_deg=[float(a) for a in _need(d, "look_pose_deg")],
-            gripper_open=int(_need(gripper, "open")),
-            gripper_closed=int(_need(gripper, "closed")),
+            gripper_open=int(_need(gripper, "open", "open_value")),
+            gripper_closed=int(_need(gripper, "closed", "closed_value")),
+            pad_below_tcp=float(max(pads)) if pads else 0.0,
             source=source,
         )
     except (KeyError, TypeError, IndexError) as exc:

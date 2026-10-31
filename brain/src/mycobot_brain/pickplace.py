@@ -26,6 +26,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import json
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,9 @@ from mycobot_brain.planner import PlannerError
 #: request body → the model's reply text (``planner.chat`` with its URL bound).
 VLM = Callable[[Dict[str, Any]], str]
 Emit = Callable[[Dict[str, Any]], None]
+
+DOWN: Vec = (0.0, 0.0, -1.0)
+TILTS_DEG = (0, 5, 10, 15)
 
 
 class PickPlaceError(RuntimeError):
@@ -63,6 +67,7 @@ class Settings:
     close_look_m: float = 0.15  # camera above the target's plane for the close-up look
     carry_clear_m: float = 0.05  # block bottom above the box rim while carrying
     grasp_depth_m: float = 0.0  # TCP below the block centre at the grasp
+    finger_clear_m: float = 0.004  # finger pads above the table at the grasp, whatever grasp_depth_m says
     place_clear_m: float = 0.01  # block bottom above the rim at release (negative: inside the box)
     line_step_m: float = 0.01  # straight-line segments for descend / lift / lower / retreat
     gripper_speed: int = 50
@@ -209,13 +214,17 @@ class PickPlace:
                 if found["pick"]["visible"]:
                     block = self._estimate(found["pick"], qa, c.block_plane_z, "pick", "close")
         self._phase("pre-grasp")
+        # The sim's pads reach 11.4 mm past the TCP: at the 12.5 mm block centre
+        # they would graze the table.
+        grasp_z = max(c.block_plane_z - s.grasp_depth_m, c.table_z + c.pad_below_tcp + s.finger_clear_m)
         above = (block[0], block[1], c.block_plane_z + s.pregrasp_m)
-        self._goto(self._ik(self._measured(), above), "pre-grasp", floor=clear)
+        approach = self._approach(above, (block[0], block[1], grasp_z), "grasp")
+        self._goto(self._ik(self._measured(), above, approach), "pre-grasp", floor=clear)
         self._phase("descend")
-        self._line((block[0], block[1], c.block_plane_z - s.grasp_depth_m), "descend")
+        self._line((block[0], block[1], grasp_z), "descend", approach)
         self._gripper(c.gripper_closed, "close")
         self._phase("lift")
-        self._line((block[0], block[1], lift_z), "lift")
+        self._line((block[0], block[1], lift_z), "lift", approach)
         return block, before
 
     def _place(self, instruction: str, box: Vec, lift_z: float) -> None:
@@ -230,12 +239,14 @@ class PickPlace:
                 if found["place"]["visible"]:
                     box = self._estimate(found["place"], qa, c.box_rim_z, "place", "close")
         self._phase("above place")
-        self._goto(self._ik(self._measured(), (box[0], box[1], lift_z)), "above place", floor=carry_floor)
+        release = (box[0], box[1], c.box_rim_z + c.block_edge / 2 + s.place_clear_m)
+        approach = self._approach((box[0], box[1], lift_z), release, "place")
+        self._goto(self._ik(self._measured(), (box[0], box[1], lift_z), approach), "above place", floor=carry_floor)
         self._phase("lower")
-        self._line((box[0], box[1], c.box_rim_z + c.block_edge / 2 + s.place_clear_m), "lower")
+        self._line(release, "lower", approach)
         self._gripper(c.gripper_open, "open")
         self._phase("retreat")
-        self._line((box[0], box[1], lift_z), "retreat")
+        self._line((box[0], box[1], lift_z), "retreat", approach)
 
     # -- looking -------------------------------------------------------------
 
@@ -306,11 +317,33 @@ class PickPlace:
             raise LinkError("lost the joint reading")
         return list(state["angles_deg"])
 
-    def _ik(self, seed: Sequence[float], tcp: Sequence[float]) -> List[float]:
+    def _ik(self, seed: Sequence[float], tcp: Sequence[float], approach: Vec = DOWN) -> List[float]:
         try:
-            return kinematics.solve_ik(self.calib.chain, seed, tcp, tool="tcp")
+            return kinematics.solve_ik(self.calib.chain, seed, tcp, tool="tcp", approach=approach)
         except IKError as exc:
             raise PickPlaceError(str(exc)) from exc
+
+    def _approach(self, top: Vec, bottom: Vec, what: str) -> Vec:
+        """Straight down if the arm can, else tipped towards the base a little.
+
+        Close to the base the 280 folds J3 into its limit before a vertical
+        gripper reaches the table (r < 0.15 m in the sim); tipping the fingers
+        5-15 deg inwards lets the wrist stay further out. A cube does not mind.
+        """
+        r = math.hypot(top[0], top[1])
+        for tilt in TILTS_DEG:
+            t = math.radians(tilt)
+            a = (-math.sin(t) * top[0] / r, -math.sin(t) * top[1] / r, -math.cos(t))
+            try:
+                q = kinematics.solve_ik(self.calib.chain, self.calib.look_pose_deg, top, approach=a)
+                kinematics.solve_ik(self.calib.chain, q, bottom, approach=a)
+            except IKError:
+                continue
+            if tilt:
+                self.log.event("approach", what=what, tilt_deg=tilt)
+            return a
+        raise PickPlaceError(f"{what}: no IK for z {bottom[2]:.3f}..{top[2]:.3f} at ({top[0]:.3f}, {top[1]:.3f}), "
+                             f"even tipped {TILTS_DEG[-1]} deg")
 
     def _camera_over(self, target: Vec, plane_z: float, min_tcp_z: float) -> Optional[List[float]]:
         """Camera straight above ``target``, looking down, ``close_look_m`` over its plane;
@@ -347,10 +380,10 @@ class PickPlace:
                 raise PickPlaceError(f"{phase}: the joint path takes the TCP down to z={low:.3f} (floor {floor:.3f})")
         self._send(path, phase, speed or self.s.speed)
 
-    def _line(self, goal: Sequence[float], phase: str) -> None:
+    def _line(self, goal: Sequence[float], phase: str, approach: Vec = DOWN) -> None:
         try:
             path = kinematics.line_path(self.calib.chain, self._measured(), goal, step_m=self.s.line_step_m,
-                                        max_step=self.s.max_step)
+                                        max_step=self.s.max_step, approach=approach)
         except IKError as exc:
             raise PickPlaceError(f"{phase}: {exc}") from exc
         self._send(path, phase, self.s.slow_speed)

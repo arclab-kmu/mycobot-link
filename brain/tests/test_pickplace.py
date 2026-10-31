@@ -2,13 +2,14 @@ import json
 import math
 import threading
 import time
+from pathlib import Path
 
 import pytest
 import scene
 from conftest import wait_until
 from test_camera import FakeCamera
 
-from mycobot_brain import kinematics, pickplace
+from mycobot_brain import calib, kinematics, pickplace
 from mycobot_brain.camera import CameraLink
 from mycobot_brain.planner import PlannerError
 
@@ -59,16 +60,16 @@ def events(tmp_path):
     return [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
 
 
-def run(link, camera, arm, tmp_path, vlm=None, **settings):
-    calib = scene.load()
+def run(link, camera, arm, tmp_path, vlm=None, calib=None, **settings):
+    calib = calib or scene.load()
     vlm = vlm or scene.SceneVLM(calib, lambda: where(arm))
     log = pickplace.RunLog(tmp_path)
     s = pickplace.Settings(**{**dict(execute=True), **FAST, **settings})
     return pickplace.PickPlace(link, camera, calib, vlm, log, s).run("빨간 블록을 잡아서 갈색 상자 안에 넣어"), vlm
 
 
-def tcp(q):
-    return kinematics.position(scene.load().chain.pose(q, "tcp"))
+def tcp(q, calib=None):
+    return kinematics.position((calib or scene.load()).chain.pose(q, "tcp"))
 
 
 def at_gripper(arm, n):
@@ -230,3 +231,17 @@ def test_an_arm_that_does_not_arrive_stops_the_run(link, camera, arm, tmp_path):
         assert len(sent(arm, ("move_joints",))) == 1
     finally:
         stop.set()
+
+
+def test_sim_calib_near_the_base_tips_the_fingers_in_and_keeps_them_off_the_table(link, camera, teleporting, tmp_path):
+    """At r = 0.147 m a vertical grasp folds J3 past its limit in the sim scene."""
+    sim = calib.load(Path(__file__).parent / "data" / "sim_calib.json")
+    block, box = (0.14, 0.045, sim.block_plane_z), (0.2, -0.04, sim.box_rim_z)
+    vlm = scene.SceneVLM(sim, lambda: where(teleporting), block=block, box=box)
+    result, _ = run(link, camera, teleporting, tmp_path, vlm=vlm, calib=sim)
+    assert result["ok"]
+    assert [e["tilt_deg"] for e in events(tmp_path) if e["event"] == "approach"] == [5]
+    grasp = tcp(at_gripper(teleporting, 2), sim)
+    assert math.dist(grasp[:2], block[:2]) < 0.002
+    assert grasp[2] == pytest.approx(0.0114 + 0.004, abs=0.0005)  # pads 4 mm over the table, not at the block centre
+    assert math.dist(tcp(at_gripper(teleporting, 3), sim)[:2], box[:2]) < 0.002

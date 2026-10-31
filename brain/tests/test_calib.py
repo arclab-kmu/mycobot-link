@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+from pathlib import Path
 
 import pytest
 import scene
@@ -45,3 +46,28 @@ def test_a_missing_field_is_named(tmp_path):
     (tmp_path / "c.json").write_text(json.dumps(d))
     with pytest.raises(calib.CalibError, match="look_pose_deg"):
         calib.load(tmp_path / "c.json")
+
+
+SIM = Path(__file__).parent / "data" / "sim_calib.json"
+
+
+def test_the_sim_calib_loads_and_fk_matches_the_sims_own():
+    """data/sim_calib.json is the Isaac Lab scene's file as sim-scene wrote it
+    (2026-11-01); fk_check holds the sim's TCP and camera poses at five angle sets."""
+    c = calib.load(SIM)
+    assert (c.block_edge, c.box_rim_z, c.gripper_open, c.gripper_closed) == (0.025, 0.045, 100, 0)
+    assert c.pad_below_tcp == pytest.approx(0.0114) and c.camera.fx == pytest.approx(548.3)
+    for check in json.loads(SIM.read_text())["fk_check"]:
+        q = check["angles_deg"]
+        assert kinematics.position(c.chain.pose(q, "tcp")) == pytest.approx(check["tcp_xyz_m"], abs=1e-5)
+        cam = c.chain.pose(q, "camera")
+        assert kinematics.position(cam) == pytest.approx(check["camera_xyz_m"], abs=1e-5)
+        assert [cam[i][j] for i in range(3) for j in range(3)] == pytest.approx(
+            [v for row in check["camera_R"] for v in row], abs=1e-5)
+
+
+def test_firmware_offsets_follow_the_sim_convention():
+    d = json.loads(SIM.read_text())
+    d["arm_joints"][0]["offset_deg"] = 10.0
+    c = calib.from_dict(d)
+    assert c.chain.pose([10, 0, 0, 0, 0, 0], "tcp") == calib.load(SIM).chain.pose([0] * 6, "tcp")

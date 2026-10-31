@@ -3,7 +3,7 @@
 Pure Python (4x4 lists), because the brain stays stdlib-only and six joints
 do not need numpy. Joint values crossing this module's boundary are
 **firmware degrees**, the numbers ``send_angles`` takes and ``state`` reports;
-each joint maps them to its model angle as ``sign * q + offset``.
+each joint maps them to its model angle as ``sign * (q - offset)``.
 
 There is no depth image anywhere: a pixel becomes a ray from the camera (K and
 the camera pose from FK of the *measured* angles), and the ray meets a plane
@@ -129,7 +129,7 @@ def _solve(a: List[List[float]], b: List[float]) -> List[float]:
 class Joint:
     """A revolute joint, URDF style: ``origin`` places the joint frame in its
     parent at zero angle, ``axis`` is in the joint frame. The model angle is
-    ``sign * firmware_deg + offset_deg``."""
+    ``sign * (firmware_deg - offset_deg)``, the sim calib's convention."""
 
     origin: Mat
     axis: Vec = (0.0, 0.0, 1.0)
@@ -137,7 +137,7 @@ class Joint:
     offset_deg: float = 0.0
 
     def model_rad(self, firmware_deg: float) -> float:
-        return math.radians(self.sign * firmware_deg + self.offset_deg)
+        return math.radians(self.sign * (firmware_deg - self.offset_deg))
 
 
 @dataclass
