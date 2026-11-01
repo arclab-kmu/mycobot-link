@@ -474,9 +474,12 @@ def parse_drawer(content: str, fx: Fixture, *, with_target: bool, width: int = 6
 
 
 def handover_question(obj: str) -> str:
-    return (f"The gripper just set the {obj} down on the table below the camera and opened. "
-            f"Is the {obj} standing on the table, out of the gripper? ok is false if the gripper still holds it "
-            "or it is not there.")
+    # D3 s452: from straight above the blue cylinder was a blue disc on the mat, and the model said
+    # the cylinder was not there.
+    return (f"The gripper just set the {obj} down on the table below the camera and opened. The camera looks "
+            "straight down, so a cylinder, cone or sphere shows as a round disc of its colour and a cube as a "
+            f"square. Is the {obj} on the table, out of the gripper? ok is false if the gripper still holds it "
+            "or nothing of its colour is there.")
 
 
 def put_question(obj: str, d: Drawer) -> str:

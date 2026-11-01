@@ -389,17 +389,28 @@ class DrawerTask(PickPlace):
         raise PickPlaceError(f"no {self.s.view} view into {d.id}: {why}")
 
     def _open_and_look(self, d: Drawer, target: Optional[str]) -> Dict[str, Any]:
-        """Open ``d`` and say what is in it; one more pull if the VLM does not see it open."""
+        """Open ``d`` and say what is in it; one more pull if neither view sees it open."""
         self._open(d)
         look = self._look_into(d, target)
-        if not look["open"]:
-            self.log.event("retry", why=f"the VLM does not see {d.id} open", seen=look["seen"])
-            self._open(d, again=True)
-            look = self._look_into(d, target)
-            if not look["open"]:
-                self._close(d, force=True)
-                raise PickPlaceError(f"{d.id} does not open: {look['seen']}")
-        return look
+        if look["open"] or look["objects"] or self._out_from_cabinet_view(d, look):
+            return {**look, "open": True}
+        self.log.event("retry", why=f"the VLM does not see {d.id} open", seen=look["seen"])
+        self.opening[d.id] = 0.0  # both views say shut: pull from there
+        self._open(d, again=True)
+        look = self._look_into(d, target)
+        if look["open"] or look["objects"] or self._out_from_cabinet_view(d, look):
+            return {**look, "open": True}
+        self._close(d, force=True)
+        raise PickPlaceError(f"{d.id} does not open: {look['seen']}")
+
+    def _out_from_cabinet_view(self, d: Drawer, look: Dict[str, Any]) -> bool:
+        """Whether the cabinet view shows ``d`` pulled out. The drawer view called an open, empty drawer
+        "closed, I cannot see inside" (D3 s500, r0c1); D2 had objects in every opened drawer it showed."""
+        self._goto(self.fx.cabinet_look_pose_deg, f"cabinet look: is {d.id} out", floor=None)
+        view = self._cabinet(f"check whether drawer {d.id} is pulled out", None, None)
+        out = d.id in view["open_drawers"]
+        self.log.event("open_check", drawer=d.id, drawer_view=look["seen"], cabinet_view=view["open_drawers"], out=out)
+        return out
 
     def _look_into(self, d: Drawer, target: Optional[str]) -> Dict[str, Any]:
         self._phase(f"look into {d.id}")
@@ -493,9 +504,10 @@ class DrawerTask(PickPlace):
         if q is not None:
             self._goto(q, "look: handover", floor=self.calib.table_z + shape.height + 0.02)
         check = self._check(drawer_vlm.handover_question(desc), [], "handover")
+        # Shut it either way: the gripper has let go, and a drawer left open fails the task too.
+        self._close(d)
         if not check["ok"]:
             raise PickPlaceError(f"the {desc} is not in the handover zone: {check['seen']}")
-        self._close(d)
 
     def _jaw(self, d: Optional[Drawer], xyz: Sequence[float], others: Sequence[Sequence[float]] = ()) -> Optional[Vec]:
         """In a drawer, the calib's pick jaw axis, or the way with more room: the open

@@ -152,12 +152,28 @@ def test_find_that_finds_nothing_shuts_every_drawer_it_opened(link, camera, tele
     assert world.all_shut() and not any(world.moved(k) for k in objects)
 
 
-def test_a_drawer_the_vlm_does_not_see_open_is_pulled_again(link, camera, teleporting, tmp_path):
-    result, world, _ = run(link, camera, teleporting, tmp_path, order=["r1c2"], open_ok={"r1c2": [False]})
+def test_a_drawer_neither_view_sees_open_is_pulled_again(link, camera, teleporting, tmp_path):
+    first = json.dumps({"seen": "all shut", "open_trays": [], "next": "r1c2"})
+    shut = json.dumps({"seen": "all shut", "open_trays": []})
+    result, world, _ = run(link, camera, teleporting, tmp_path, order=["r1c2"], open_ok={"r1c2": [False]},
+                           overrides={"cabinet": [first, shut]})
     assert result["ok"] is True
     assert [e["name"] for e in events(tmp_path) if e["event"] == "phase"].count("open r1c2") == 2
     assert any(e["event"] == "retry" for e in events(tmp_path))
     assert world.all_shut()
+
+
+def test_an_open_empty_drawer_the_drawer_view_calls_shut_is_not_pulled_again(link, camera, teleporting, tmp_path):
+    """D3 s500: r0c1, open and empty, came back "closed, I cannot see inside"; the code re-pulled from
+    shut through the open tray. The cabinet view (tray boxes) says it is out: on to the next drawer."""
+    objects = {k: v for k, v in OBJECTS.items() if v["drawer"] != "r0c1"}
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r0c1", "r1c2"],
+                           open_ok={"r0c1": [False]})
+    assert result["ok"] is True and result["drawers_opened"] == ["r0c1", "r1c2"]
+    ev = events(tmp_path)
+    assert [e["name"] for e in ev if e["event"] == "phase"].count("open r0c1") == 1
+    assert [e["out"] for e in ev if e["event"] == "open_check"] == [True]
+    assert world.in_handover("yellow_cone") and world.all_shut()
 
 
 def test_a_drawer_left_open_at_the_end_is_pushed_shut_again(link, camera, teleporting, tmp_path):
