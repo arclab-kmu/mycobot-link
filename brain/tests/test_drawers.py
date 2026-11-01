@@ -289,18 +289,19 @@ def test_joint_moves_keep_the_pad_tips_off_the_handles(tmp_path):
         task._handle_plan(d)  # every handle: look <-> standoff, shut and open, clear of the others
 
 
-def test_on_sim_scene_numbers_a_cone_from_the_right_column_goes_to_the_mat_in_a_straight_slow_line(
+def test_on_sim_scene_numbers_a_cone_is_gripped_on_its_skirt_and_carried_without_a_detour(
         link, camera, teleporting, tmp_path, monkeypatch):
-    """D3 s501: the joint carry from r2c2 to the handover mat went round by the cabinet look at full
-    speed and the cone fell off its skirt grasp."""
+    """D3: from r2c2 the carry once went round by the cabinet look at full speed (s501, e8eadbb), and
+    gripped 1.5 mm above the catalogue's skirt height three cones slid out on a long carry (788cb77)."""
     monkeypatch.setattr(cs, "load", cs.load_sim_like)
     objects = {"yellow_cone": dict(SIM_OBJECTS["yellow_cone"], drawer="r2c2", xy=[0.289, -0.0985])}
     result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r2c2"])
     assert result["ok"] is True, result
     ev = events(tmp_path)
     assert not any(e["event"] == "detour" for e in ev)
-    carry = [e for e in ev if e["event"] == "move" and e["phase"] == "carry: handover"]
-    assert carry and all(e["speed"] == drawers.DrawerSettings().slow_speed for e in carry)
+    assert not any(e["event"] == "carry" and e["how"] == "detour" for e in ev)
+    grasp = [e for e in ev if e["event"] == "move" and e["phase"] == "descend"][-1]
+    assert grasp["tcp_xyz"][2] == pytest.approx(0.103 + 0.019, abs=0.001)  # floor + the cone's grasp height
     assert world.in_handover("yellow_cone") and world.all_shut()
 
 

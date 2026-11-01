@@ -43,6 +43,7 @@ class DrawerSettings(Settings):
     max_drawers: int = 9
     yaw_drift_deg: float = 30.0  # how far a free-heading pull may turn the gripper
     finger_half_m: float = 0.028  # TCP to the outside of a finger, jaw open (45.6 mm gap + the finger)
+    pad_floor_clear_m: float = 0.001  # pad tips above a drawer floor or the table at the grasp
 
 
 def _add(a: Sequence[float], b: Sequence[float], s: float = 1.0) -> Vec:
@@ -563,7 +564,10 @@ class DrawerTask(PickPlace):
                 before, view = frame.jpeg, qa
                 if found["pick"]["visible"]:
                     xyz = self._estimate(found["pick"], qa, plane, "pick", "close")
-        grasp_z = max(surface_z + shape.grasp_height, surface_z + c.pad_below_tcp + s.finger_clear_m)
+        # The catalogue's grasp height is sim-scene's, checked physically (a cone on its 8 mm skirt at
+        # 19 mm): only keep the pad tips off the surface. With pick-place's 4 mm clearance the TCP sat
+        # at 20.5 mm, the pads barely held the skirt, and three cones slid out on the way (D3, 788cb77).
+        grasp_z = max(surface_z + shape.grasp_height, surface_z + c.pad_below_tcp + s.pad_floor_clear_m)
         if self.fx.pick_above_m is not None:
             # The calib's height: a top-row drawer's floor is high enough that ours is out of reach.
             above = (xyz[0], xyz[1], max(clear, surface_z + self.fx.pick_above_m))
@@ -646,26 +650,36 @@ class DrawerTask(PickPlace):
             self._line((via[0], via[1], carry), "retreat: out of the drawer", DOWN)
 
     def _carry(self, goal: Vec, phase: str, floor: float) -> None:
-        """Holding something, to ``goal``: a straight line where the arm can and it stays clear, else a
-        joint move; slowly either way. D3 s501: from in front of r2c2 the joint arc to the handover mat
-        swung towards the open tray, the move went round by the cabinet look at full speed, and the
-        cone (held by its 8 mm skirt) fell on the way. Lines from in front of every drawer to the mat
-        are within reach and clear on sim-scene's numbers."""
-        start = kinematics.position(self.calib.chain.pose(self._measured(), "tcp"))[2]
-        try:
-            path = kinematics.line_path(self.calib.chain, self._measured(), goal, step_m=self.s.line_step_m,
-                                        max_step=self.s.max_step, approach=DOWN)
-            why = self._path_clear(path)
-            low = min(kinematics.position(self.calib.chain.pose(q, "tcp"))[2] for q in path)
-            if why is None and low < min(floor, start) - 1e-3:
-                why = f"the line dips to z={low:.3f}"
-        except IKError as exc:
-            path, why = [], str(exc)
+        """Holding something, to ``goal``: a joint move where it is clear, else a slow straight line, else
+        a slow detour by the cabinet look. D3 s501 (e8eadbb): from in front of r2c2 the joint arc to the
+        handover mat swung towards the open tray and the full-speed detour shook the cone out."""
+        chain, here = self.calib.chain, self._measured()
+        start = kinematics.position(chain.pose(here, "tcp"))[2]
+
+        def low(path: Sequence[Sequence[float]]) -> float:
+            return min(kinematics.position(chain.pose(q, "tcp"))[2] for q in path)
+
+        # A joint move first, when it is clear: short (cones held in the e8eadbb pass), where the slow
+        # straight line past the base took 12 s and a cone slid out of the pads on the way (788cb77).
+        q = self._ik(here, goal, DOWN)
+        joint = kinematics.joint_path(here, q, self.s.max_step)
+        why = self._path_clear(joint) or (f"the joint path dips to z={low(joint):.3f}"
+                                          if low(joint) < min(floor, start) - 1e-3 else None)
         if why is None:
-            self._send(path, phase, self.s.slow_speed)
+            self._send(joint, phase, self.s.speed)
             return
-        self.log.event("carry", phase=phase, how="joint move", why=f"no straight line: {why}")
-        q = self._ik(self._measured(), goal, DOWN)
+        try:
+            line = kinematics.line_path(chain, here, goal, step_m=self.s.line_step_m, max_step=self.s.max_step,
+                                        approach=DOWN)
+            why_line = self._path_clear(line) or (f"the line dips to z={low(line):.3f}"
+                                                  if low(line) < min(floor, start) - 1e-3 else None)
+        except IKError as exc:
+            line, why_line = [], str(exc)
+        if why_line is None:
+            self.log.event("carry", phase=phase, how="straight line", why=f"no joint move: {why}")
+            self._send(line, phase, self.s.slow_speed)
+            return
+        self.log.event("carry", phase=phase, how="detour", why=f"no joint move: {why}; no line: {why_line}")
         self._goto(q, phase, floor=floor, speed=self.s.slow_speed)
 
     def _leave_drawer(self, d: Drawer, shape: Shape) -> None:
