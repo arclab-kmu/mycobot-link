@@ -287,3 +287,35 @@ def test_joint_moves_keep_the_pad_tips_off_the_handles(tmp_path):
     assert scene.fixture.standoff_m == 0.08
     for d in scene.fixture.drawers.values():
         task._handle_plan(d)  # every handle: look <-> standoff, shut and open, clear of the others
+
+
+def test_on_sim_scene_numbers_a_cone_from_the_right_column_goes_to_the_mat_in_a_straight_slow_line(
+        link, camera, teleporting, tmp_path, monkeypatch):
+    """D3 s501: the joint carry from r2c2 to the handover mat went round by the cabinet look at full
+    speed and the cone fell off its skirt grasp."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    objects = {"yellow_cone": dict(SIM_OBJECTS["yellow_cone"], drawer="r2c2", xy=[0.289, -0.0985])}
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r2c2"])
+    assert result["ok"] is True, result
+    ev = events(tmp_path)
+    assert not any(e["event"] == "detour" for e in ev)
+    carry = [e for e in ev if e["event"] == "move" and e["phase"] == "carry: handover"]
+    assert carry and all(e["speed"] == drawers.DrawerSettings().slow_speed for e in carry)
+    assert world.in_handover("yellow_cone") and world.all_shut()
+
+
+def test_on_sim_scene_numbers_the_close_look_into_a_drawer_is_the_calib_s_straight_down_view(
+        link, camera, teleporting, tmp_path, monkeypatch):
+    """D3 s503: the camera-over close look into r0c1 leaned the open jaw into r2c1's handle and stalled.
+    That path is now refused (a finger in the cabinet), and the calib's top-down view is used first."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    scene = cs.load_sim_like()
+    task = drawers.DrawerTask(None, None, scene, None, pickplace.RunLog(tmp_path / "t"), drawers.DrawerSettings())
+    s503 = kinematics.joint_path(scene.fixture.drawer("r0c1").look_pose_deg, [5.07, -21.54, -77.05, 7.23, 4.21, -8.5], 8.0)
+    assert "a finger" in task._path_clear(s503)
+    objects = {"yellow_cone": dict(SIM_OBJECTS["yellow_cone"], drawer="r0c1", xy=[0.289, 0.004], z=0.023 + 0.013)}
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r0c1"])
+    assert result["ok"] is True, result
+    close = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "close look: r0c1"]
+    assert close[-1]["angles_deg"] == pytest.approx(scene.fixture.drawer("r0c1").topdown_pose_deg, abs=0.01)
+    assert world.in_handover("yellow_cone") and world.all_shut()

@@ -76,7 +76,9 @@ def main() -> None:
     p.add_argument("--json", type=Path, help="also write the rows here")
     args = p.parse_args()
     rows: List[Dict[str, Any]] = []
-    for d in sorted(x for x in args.runs.glob(args.glob) if x.is_dir()):
+    # Run directories only: archived passes (d3_try*) sit beside them.
+    runs = [x for x in args.runs.glob(args.glob) if x.is_dir() and x.name.split("_")[1:2] in (["put"], ["take"], ["find"])]
+    for d in sorted(runs):
         try:
             rows.append(score(d))
         except (FileNotFoundError, json.JSONDecodeError, IndexError, KeyError) as exc:

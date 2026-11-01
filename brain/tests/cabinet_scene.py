@@ -290,6 +290,13 @@ SIM_LOOKS = {  # each drawer's tilted look, opened; r1c2 and r2c2 hold the TCP l
     "r2c0": [112.4, -20.5, -35.0, -72.6, -43.9, 9.1], "r2c1": [-71.9, 2.4, -80.1, -34.2, 42.7, 14.4],
     "r2c2": [-73.6, -29.6, -43.1, -45.5, 40.7, 38.8],
 }
+SIM_TOPDOWN = {  # camera straight down over each opened drawer's floor
+    "r0c0": [32.3, -30.5, -18.7, -41.2, -8.1, 47.3], "r0c1": [10.0, -7.0, -71.1, -13.3, -7.9, 55.1],
+    "r0c2": [-13.9, -22.3, -72.1, 6.3, -7.8, 31.0], "r1c0": [33.8, -11.3, -57.5, -25.7, -6.7, 79.2],
+    "r1c1": [10.0, -8.5, -63.2, -19.8, -7.9, 55.1], "r1c2": [-13.9, -26.2, -41.8, -20.2, -7.8, 31.0],
+    "r2c0": [43.8, -25.3, -0.0, -72.3, 1.9, 148.7], "r2c1": [12.5, -19.1, -14.8, -61.4, -5.9, 87.8],
+    "r2c2": [-0.1, -21.4, -8.6, -66.9, 4.0, 164.7],
+}
 SIM_SHAPES = {
     "cube": {"height_m": 0.025, "width_m": 0.025, "grasp_height_m": 0.0205, "diagonal_m": 0.0354},
     "cylinder": {"height_m": 0.025, "width_m": 0.026, "grasp_height_m": 0.0205},
@@ -315,6 +322,7 @@ def sim_like_dict():
                 "floor_z_m": z0 + 0.005,
                 "interior_closed_m": {"center": [0.289, y], "size": [0.072, 0.072, 0.031], "wall_height_m": 0.016},
                 "look_pose_deg": SIM_LOOKS[f"r{r}c{c}"],
+                "topdown_pose_deg": SIM_TOPDOWN[f"r{r}c{c}"],
             })
     d["cabinet"] = {
         "front_x_m": SIM_FRONT_X,

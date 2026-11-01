@@ -121,6 +121,8 @@ class Fixture:
     far_m: Optional[float] = None
     #: how far closed handles stick out of the cabinet body towards the robot
     handle_protrusion_m: float = 0.0
+    #: a handle's protrusion, width and height (along the pull, across it, up)
+    handle_size: Optional[Vec] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- where things are -------------------------------------------------------
@@ -151,6 +153,19 @@ class Fixture:
             elif a > 0.5:
                 hi[i] += self.handle_protrusion_m
         return tuple(lo), tuple(hi)  # type: ignore[return-value]
+
+    def knob_boxes(self, openings: Dict[str, float]) -> List[Tuple[str, Vec, Vec]]:
+        """Each handle as a box where its drawer is (``openings``, m out); [] without the handle's size."""
+        if self.handle_size is None:
+            return []
+        prot, width, height = self.handle_size
+        a = self.pull_axis
+        half = [prot / 2 if abs(a[0]) > 0.5 else width / 2, prot / 2 if abs(a[1]) > 0.5 else width / 2, height / 2]
+        out = []
+        for d in self.drawers.values():
+            c = self.knob(d, openings.get(d.id, 0.0))
+            out.append((d.id, tuple(c[i] - half[i] for i in range(3)), tuple(c[i] + half[i] for i in range(3))))
+        return out  # type: ignore[return-value]
 
     def knob(self, d: Drawer, opening: float) -> Vec:
         """The handle's centre with the drawer ``opening`` m out, for marking it in a picture."""
@@ -336,6 +351,8 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
             pick_above_m=None if pick_above is None else float(pick_above),
             far_m=None if grasp.get("far_m") is None else float(grasp["far_m"]),
             handle_protrusion_m=float((cab.get("handle_m") or {}).get("protrusion", 0.0)),
+            handle_size=(None if not {"protrusion", "width", "height"} <= set(cab.get("handle_m") or {}) else
+                         tuple(float(cab["handle_m"][k]) for k in ("protrusion", "width", "height"))),  # type: ignore[arg-type]
         )
     except (KeyError, TypeError, IndexError) as exc:
         raise FixtureError(f"cabinet calib: {exc!r}") from exc
