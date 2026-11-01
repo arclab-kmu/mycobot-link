@@ -77,6 +77,9 @@ def test_parse_command_checks_its_fields():
     assert drawer_vlm.parse_command(ok, f) == {"task": "find", "colour": "yellow", "shape": "cone", "drawer": None}
     with pytest.raises(PlannerError, match="needs a drawer"):
         drawer_vlm.parse_command(json.dumps({"task": "take", "colour": "any", "shape": "any", "drawer": "none"}), f)
+    # D3: "노란색 원뿔 찾아서 꺼내 줘" came back as take with no drawer; a named object with none is a search.
+    took = json.dumps({"task": "take", "colour": "yellow", "shape": "cone", "drawer": "none"})
+    assert drawer_vlm.parse_command(took, f)["task"] == "find"
     with pytest.raises(PlannerError, match="needs an object"):
         drawer_vlm.parse_command(json.dumps({"task": "find", "colour": "any", "shape": "any", "drawer": "none"}), f)
     with pytest.raises(PlannerError, match="out of range"):

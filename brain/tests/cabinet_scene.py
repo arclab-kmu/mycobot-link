@@ -283,6 +283,13 @@ SIM_TCP_X = {0: 0.2226, 1: 0.222, 2: 0.2226}
 SIM_OPEN_M = 0.1
 SIM_CABINET_LOOK = [-7.9, 19.8, -5.0, -66.0, 25.9, -132.1]
 SIM_TABLE_LOOK = [81.1, -38.0, -42.9, -1.3, 1.3, -53.8]  # straight down over the handover mat
+SIM_LOOKS = {  # each drawer's tilted look, opened; r1c2 and r2c2 hold the TCP lower than wall top + 2 cm
+    "r0c0": [95.5, -56.2, -22.8, -51.1, -41.9, 12.2], "r0c1": [-69.1, -12.5, -117.6, 25.3, 46.3, -8.5],
+    "r0c2": [-79.3, -40.9, -59.4, -22.2, 37.7, 32.2], "r1c0": [117.9, -23.3, -43.7, -64.9, -40.4, 14.8],
+    "r1c1": [-71.9, 2.5, -104.2, -10.2, 42.7, 14.4], "r1c2": [-73.6, -27.9, -69.8, -20.9, 40.6, 38.6],
+    "r2c0": [112.4, -20.5, -35.0, -72.6, -43.9, 9.1], "r2c1": [-71.9, 2.4, -80.1, -34.2, 42.7, 14.4],
+    "r2c2": [-73.6, -29.6, -43.1, -45.5, 40.7, 38.8],
+}
 SIM_SHAPES = {
     "cube": {"height_m": 0.025, "width_m": 0.025, "grasp_height_m": 0.0205, "diagonal_m": 0.0354},
     "cylinder": {"height_m": 0.025, "width_m": 0.026, "grasp_height_m": 0.0205},
@@ -307,6 +314,7 @@ def sim_like_dict():
                 "approach": approach, "jaw_axis": [0.0, 0.0, 1.0],
                 "floor_z_m": z0 + 0.005,
                 "interior_closed_m": {"center": [0.289, y], "size": [0.072, 0.072, 0.031], "wall_height_m": 0.016},
+                "look_pose_deg": SIM_LOOKS[f"r{r}c{c}"],
             })
     d["cabinet"] = {
         "front_x_m": SIM_FRONT_X,

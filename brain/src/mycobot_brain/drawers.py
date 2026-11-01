@@ -208,7 +208,7 @@ class DrawerTask(PickPlace):
                 raise PickPlaceError(f"lost the {desc} on the table: {found['seen']}")
             start = self._estimate(found["pick"], q, c.table_z + shape.height / 2, "pick", "table")
         self._put_down(spot, d.floor_z, shape, f"into {d.id}", wall_top=self._wall_top(d),
-                    clear=self.s.drawer_clear_m)
+                       clear=self.s.drawer_clear_m, drawer=d)
         self._phase("check put")
         self._goto(look["angles"], f"look: {d.id}", floor=None)
         check = self._check(drawer_vlm.put_question(desc, d), [("Before:", look["jpeg"])], "put")
@@ -323,6 +323,12 @@ class DrawerTask(PickPlace):
         self._phase(f"{verb} {d.id}")
         release = fx.handle_open_value if fx.handle_open_value is not None else c.gripper_open
         self._gripper(release, "open")
+        # Every knob approach starts from the cabinet look, as the reset pose and sim-scene's D1 runs
+        # do: in D3 s462 the joint move from the table look to r0c2's pre-grasp swept low across the
+        # cabinet front and the arm stalled 6.8 deg short (it hit something our TCP/camera check misses).
+        here, look = self._measured(), fx.cabinet_look_pose_deg
+        if look and max(abs(a - b) for a, b in zip(here, look)) > 1.0:
+            self._goto(look, f"{verb} {d.id}: cabinet look", floor=None)
         try:
             q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.handle(d, start), a, -fx.pregrasp_m),
                                     approach=a, jaw=j)
@@ -466,9 +472,10 @@ class DrawerTask(PickPlace):
             if look["target"] is None:
                 raise PickPlaceError(f"lost the {desc} in {d.id}: {look['seen']}")
             obj = look["objects"][look["target"]]
+        self._leave_drawer(d, shape)
         h = self.fx.handover_center
         self._put_down((h[0], h[1], self.calib.table_z), self.calib.table_z, shape, "handover",
-                    wall_top=None, clear=self.s.handover_clear_m)
+                       wall_top=None, clear=self.s.handover_clear_m)
         self._phase("check handover")
         q = self._camera_over((h[0], h[1], self.calib.table_z), self.calib.table_z + shape.height / 2,
                               min_tcp_z=self.calib.table_z + shape.height + 0.03)
@@ -555,37 +562,84 @@ class DrawerTask(PickPlace):
             raise NotHeld(f"the {desc} was not held: {check['seen']}")
 
     def _put_down(self, xyz: Vec, surface_z: float, shape: Shape, where: str, wall_top: Optional[float],
-               clear: float) -> None:
-        """Carry what is held over ``xyz``, lower until its bottom is ``clear`` over the surface, let go."""
+                  clear: float, drawer: Optional[Drawer] = None) -> None:
+        """Carry what is held over ``xyz``, lower until its bottom is ``clear`` over the surface, let go.
+
+        Into an opened ``drawer`` it goes by a point in front of the tray at carry height and then
+        straight in over the front panel, and leaves the same way: the arm does not reach a top-row
+        carry height over the handover mat (D3 s460), and a joint move may dip on the way over the
+        panel. sim-scene's D1 oracle rises and descends only outside the open drawer too.
+        """
         s, c = self.s, self.calib
         release_z = surface_z + shape.grasp_height + clear
         least = max(release_z, (wall_top or surface_z) + shape.grasp_height + s.wall_clear_m)
-        carry = self._reachable_z(xyz, [least + 0.03, least + 0.015, least], DOWN, None)
+        via = None if drawer is None else self._front_of(drawer, xyz)
+        carry = self._reachable_z([xyz] + ([via] if via else []), [least + 0.03, least + 0.015, least], DOWN, None)
         self._phase(f"carry: {where}")
-        # Up first where it is: the joint move across may not dip below the carry floor, and the
-        # object may have come off a lower surface (the table) than the one it goes to.
-        here = kinematics.position(c.chain.pose(self._measured(), "tcp"))
-        if here[2] < carry - 0.005:
-            self._line((here[0], here[1], carry), f"raise: {where}", DOWN)
-        q = self._ik(self._measured(), (xyz[0], xyz[1], carry), DOWN)
-        self._goto(q, f"carry: {where}", floor=surface_z + shape.grasp_height + 0.01)
+        self._rise(carry, f"raise: {where}")
+        if via is not None:
+            q = self._ik(self._measured(), (via[0], via[1], carry), DOWN)
+            self._goto(q, f"carry: {where}: in front", floor=surface_z + shape.grasp_height + 0.01)
+            self._line((xyz[0], xyz[1], carry), f"carry: {where}", DOWN)
+        else:
+            q = self._ik(self._measured(), (xyz[0], xyz[1], carry), DOWN)
+            self._goto(q, f"carry: {where}", floor=surface_z + shape.grasp_height + 0.01)
         self._phase(f"lower: {where}")
         self._line((xyz[0], xyz[1], release_z), f"lower: {where}", DOWN)
         self._gripper(c.gripper_open, "open")
         self._phase("retreat")
         self._line((xyz[0], xyz[1], carry), "retreat", DOWN)
+        if via is not None:
+            self._line((via[0], via[1], carry), "retreat: out of the drawer", DOWN)
 
-    def _reachable_z(self, xyz: Sequence[float], heights: Sequence[float], approach: Optional[Vec],
-                     jaw: Optional[Vec]) -> float:
-        """The first of ``heights`` (best first) the arm reaches over ``xyz`` with that grip."""
+    def _leave_drawer(self, d: Drawer, shape: Shape) -> None:
+        """With an object out of ``d``: up until it clears the walls, then straight out past the front."""
+        top = self._wall_top(d) + shape.grasp_height
+        here = kinematics.position(self.calib.chain.pose(self._measured(), "tcp"))
+        via = self._front_of(d, here)
+        z = self._reachable_z([here, via], [top + self.s.wall_clear_m, top + 0.006], DOWN, None)
+        self._phase(f"out of {d.id}")
+        self._rise(z, f"out of {d.id}: up")
+        # From higher up (the held check's view) the line falls to z as it goes, never below it.
+        self._line((via[0], via[1], z), f"out of {d.id}", DOWN)
+
+    def _front_of(self, d: Drawer, p: Sequence[float]) -> Vec:
+        """On the line through ``p`` along the pull, clear in front of the opened tray: past its inner
+        front wall by the wall, a jaw along the pull around the widest object, and 1 cm."""
+        fx = self.fx
+        a, _ = fx.axes()
+        c = fx.interior_center(d, fx.open_m)
+        along, _ = fx.extent(d)
+        s = (c[0] - p[0]) * a[0] + (c[1] - p[1]) * a[1] + along / 2 + 0.045
+        return (p[0] + s * a[0], p[1] + s * a[1], p[2] if len(p) > 2 else 0.0)
+
+    def _rise(self, z: float, phase: str) -> None:
+        """Straight up where the TCP is, to ``z`` or as near it as the arm reaches there."""
+        here = kinematics.position(self.calib.chain.pose(self._measured(), "tcp"))
+        if here[2] >= z - 0.005:
+            return
+        steps = [z - 0.01 * i for i in range(int((z - here[2]) / 0.01) + 1)]
+        try:
+            top = self._reachable_z([here], steps, DOWN, None)
+        except PickPlaceError:
+            return
+        if top > here[2] + 0.005:
+            self._line((here[0], here[1], top), phase, DOWN)
+
+    def _reachable_z(self, points: Sequence[Sequence[float]], heights: Sequence[float],
+                     approach: Optional[Vec], jaw: Optional[Vec]) -> float:
+        """The first of ``heights`` (best first) the arm reaches over every one of ``points`` (or over
+        the one point ``points``) with that grip."""
+        pts = [points] if isinstance(points[0], (int, float)) else points
         for z in heights:
             try:
-                kinematics.solve_ik(self.calib.chain, self._measured(), (xyz[0], xyz[1], z), tool="tcp",
-                                    approach=approach if approach is not None else DOWN, jaw=jaw)
+                for p in pts:
+                    kinematics.solve_ik(self.calib.chain, self._measured(), (p[0], p[1], z), tool="tcp",
+                                        approach=approach if approach is not None else DOWN, jaw=jaw)
                 return z
             except IKError:
                 continue
-        raise PickPlaceError(f"out of reach over {_r(xyz, 3)} at every height {_r(heights, 3)}")
+        raise PickPlaceError(f"out of reach over {_r(pts[0], 3)} at every height {_r(heights, 3)}")
 
     # -- staying out of the cabinet -------------------------------------------------
 
@@ -614,7 +668,12 @@ class DrawerTask(PickPlace):
             raise PathBlocked(f"{phase}: the joint path would put the {why}")
 
     def _goto(self, goal: Sequence[float], phase: str, floor: Optional[float], speed: Optional[int] = None) -> None:
-        """As pick-place's, but a path through the cabinet goes round by the cabinet look pose."""
+        """As pick-place's, but a path through the cabinet goes round by the cabinet look pose, and the
+        floor is no higher than where the path starts."""
+        if floor is not None:
+            # sim-scene's tilted looks into r1c2 and r2c2 hold the TCP beside the drawer below the
+            # floor for above it (wall top + 2 cm): the path may not go lower than it starts (D3 s451).
+            floor = min(floor, kinematics.position(self.calib.chain.pose(self._measured(), "tcp"))[2])
         try:
             super()._goto(goal, phase, floor, speed)
         except PathBlocked as exc:

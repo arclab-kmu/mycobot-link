@@ -12,6 +12,7 @@ FIND = "노란색 원뿔 찾아서 꺼내 줘"
 COMMANDS = {
     FIND: {"task": "find", "colour": "yellow", "shape": "cone", "drawer": "none"},
     "왼쪽 아래 서랍에 있는 물건을 꺼내 줘": {"task": "take", "colour": "any", "shape": "any", "drawer": "r0c0"},
+    "오른쪽 가운데 서랍에 있는 물건을 꺼내 줘": {"task": "take", "colour": "any", "shape": "any", "drawer": "r1c2"},
     "파란 큐브를 가운데 서랍에 넣어": {"task": "put", "colour": "blue", "shape": "cube", "drawer": "r1c1"},
 }
 
@@ -243,3 +244,16 @@ def test_on_sim_scene_numbers_the_knob_is_pinched_from_the_side_and_the_cone_fou
     for e in pull:
         jaw = kinematics.column(scene.chain.pose(e["angles_deg"], "tcp"), 0)
         assert abs(jaw[2]) > 0.99  # jaw vertical the whole pull: the pads stay on the knob's top and bottom
+
+
+def test_on_sim_scene_numbers_a_take_starts_its_close_look_from_a_low_side_view(link, camera, teleporting,
+                                                                                  tmp_path, monkeypatch):
+    """D3 s451: the calib's look into r1c2 holds the TCP at z 0.112, under the close look's floor
+    (wall top + 2 cm, 0.114); the path up from there was refused as dipping below it."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    objects = dict(SIM_OBJECTS, red_cone={"colour": "red", "shape": "cone", "drawer": "r1c2",
+                                          "xy": [0.289, -0.081], "z": 0.063 + 0.013})
+    result, world, _ = run(link, camera, teleporting, tmp_path, instruction="오른쪽 가운데 서랍에 있는 물건을 꺼내 줘",
+                           objects=objects)
+    assert result["ok"] is True, result
+    assert world.in_handover("red_cone") and world.all_shut()

@@ -84,8 +84,9 @@ def build_parse_request(instruction: str, fx: Fixture, *, model: str = DEFAULT_M
     system = "\n".join([
         "You turn a command to a small robot arm into fields. The arm stands in front of a cabinet of 3x3 drawers.",
         "task: 'put' = an object lying on the table goes into the named drawer; 'take' = an object comes out of "
-        "the named drawer and is handed over; 'find' = search the drawers for the object and hand it over "
-        "(no drawer named).",
+        "the drawer the command names and is handed over; 'find' = search the drawers for the object and hand "
+        "it over. A command that names no drawer is 'find', even when it also says to take the object out "
+        "(찾아서 꺼내 줘 = find).",
         "colour and shape: of the object the command is about, 'any' for what it does not say.",
         "drawer: the drawer the command names, 'none' if it names none. The drawers, as the robot sees them:",
         fx.drawer_table(),
@@ -100,6 +101,10 @@ def parse_command(content: str, fx: Fixture) -> Dict[str, Any]:
     if task not in TASKS or colour not in fx.colours + ["any"] or shape not in list(fx.shapes) + ["any"] \
             or drawer not in list(fx.drawers) + ["none"]:
         raise PlannerError(f"command fields out of range: {content[:200]!r}")
+    if task == "take" and drawer == "none" and not (colour == "any" and shape == "any"):
+        # Taking a named object out of no named drawer means searching for it first: in D3 the model
+        # read "노란색 원뿔 찾아서 꺼내 줘" as take, drawer none, on every seed.
+        task = "find"
     if task in ("put", "take") and drawer == "none":
         raise PlannerError(f"{task} needs a drawer: {content[:200]!r}")
     if task in ("put", "find") and colour == "any" and shape == "any":
