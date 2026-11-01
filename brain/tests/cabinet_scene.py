@@ -14,7 +14,7 @@ import math
 import re
 from pathlib import Path
 
-from mycobot_brain import calib, kinematics
+from mycobot_brain import calib, drawer_vlm, kinematics
 
 SIM = json.loads((Path(__file__).parent / "data" / "sim_calib.json").read_text())
 
@@ -221,8 +221,14 @@ class CabinetVLM:
         if name == "parse":
             return json.dumps(self.commands[text.removeprefix("Command: ")])
         if name == "cabinet":
-            reply = {"seen": "a cabinet of drawers",
-                     "open_drawers": [d for d, s in self.w.opening.items() if s > 0.01]}
+            opened = [d for d, s in self.w.opening.items() if s > 0.01]
+            reply = {"seen": "a cabinet of drawers"}
+            if "open_trays" in props:  # box each pulled-out tray where it is
+                k, chain = self.w.c.camera, self.w.c.chain
+                reply["open_trays"] = [{"bbox_2d": drawer_vlm.tray_boxes(self.w.fx, chain, k, self.w.angles,
+                                                                         self.w.opening[d])[d]} for d in opened]
+            else:
+                reply["open_drawers"] = opened
             if "next" in props:
                 enum = props["next"]["enum"]
                 reply["next"] = next((d for d in self.order if d in enum), "none")
@@ -265,19 +271,23 @@ class CabinetVLM:
         raise AssertionError(f"unexpected request {name}")
 
 
-# -- sim-scene's cabinet (arc-mycobot scripts/vlm_sim/drawer_geometry.py + drawer_plan.py, 2026-11-01 16:40,
-#    work in progress there): knob pinched from the side at a heading per column, a 93 mm pull that brings
-#    the whole tray out, full-height drawer fronts over 16 mm tray walls.
-SIM_FRONT_X = 0.24
-SIM_COL_Y = (0.088, 0.0, -0.088)
-SIM_BAY_Z = tuple(0.018 + r * 0.040 for r in range(3))  # bay bottoms
+# -- sim-scene's cabinet as /home/hkim/mycobot-sim/sim_calib_drawers.json has it (v2, 2026-11-01 19:07),
+#    in its own key layout: knob pinched top and bottom at a heading per column (no cabinet-wide one),
+#    the TCP target 3 mm short of the front, a 100 mm pull, a full-height front over 16 mm tray walls,
+#    a preshape value instead of fully open, the pick height and jaw from its "pick" section.
+SIM_FRONT_X = 0.245
+SIM_COL_Y = (0.081, 0.0, -0.081)
+SIM_BAY_Z = (0.018, 0.058, 0.098)  # bay bottoms
 SIM_YAW = {0: -20.0, 1: 40.0, 2: 20.0}  # handle heading per column
-SIM_OPEN_M = 0.093
+SIM_TCP_X = {0: 0.2226, 1: 0.222, 2: 0.2226}
+SIM_OPEN_M = 0.1
+SIM_CABINET_LOOK = [-7.9, 19.8, -5.0, -66.0, 25.9, -132.1]
+SIM_TABLE_LOOK = [81.1, -38.0, -42.9, -1.3, 1.3, -53.8]  # straight down over the handover mat
 SIM_SHAPES = {
-    "cube": {"size_m": [0.025, 0.025, 0.025], "height_m": 0.025, "grasp_tcp_height_m": 0.0205},
-    "cylinder": {"radius_m": 0.013, "height_m": 0.025, "grasp_tcp_height_m": 0.0205},
-    "sphere": {"radius_m": 0.013, "height_m": 0.026, "grasp_tcp_height_m": 0.0205},
-    "cone": {"radius_m": 0.015, "height_m": 0.026, "grasp_tcp_height_m": 0.0205},
+    "cube": {"height_m": 0.025, "width_m": 0.025, "grasp_height_m": 0.0205, "diagonal_m": 0.0354},
+    "cylinder": {"height_m": 0.025, "width_m": 0.026, "grasp_height_m": 0.0205},
+    "sphere": {"height_m": 0.026, "width_m": 0.026, "grasp_height_m": 0.0205},
+    "cone": {"height_m": 0.026, "width_m": 0.03, "grasp_height_m": 0.019},
 }
 
 
@@ -287,31 +297,33 @@ def sim_like_dict():
     for r, z0 in enumerate(SIM_BAY_Z):
         for c, y in enumerate(SIM_COL_Y):
             a = math.radians(SIM_YAW[c])
-            reach = 0.0165 * math.cos(a) + 0.0115 * abs(math.sin(a)) + 0.003
-            x = min(SIM_FRONT_X - 0.024 + 0.024 - reach, SIM_FRONT_X - 0.012)
+            approach = [round(math.cos(a), 6), round(math.sin(a), 6), 0.0]
             drawers.append({
                 "id": f"r{r}c{c}", "row": r, "col": c,
-                "handle_closed_m": [x, y, z0 + 0.018],
-                "handle_grasp": {"approach": [math.cos(a), math.sin(a), 0.0], "jaw_axis": [0, 0, 1]},
+                "front_panel_z_m": [z0 + 0.0005, z0 + 0.0355],
+                "handle_center_closed_m": [0.236, y, z0 + 0.018],
+                "handle_grasp": {"tool_yaw_deg": SIM_YAW[c], "tcp_closed_m": [SIM_TCP_X[c], y, z0 + 0.018]},
+                "handle_closed_m": [SIM_TCP_X[c], y, z0 + 0.018],
+                "approach": approach, "jaw_axis": [0.0, 0.0, 1.0],
                 "floor_z_m": z0 + 0.005,
-                "front_top_z_m": z0 + 0.0355,
-                "interior_closed_m": {"center": [SIM_FRONT_X + 0.008 + 0.036, y], "size": [0.072, 0.074, 0.016]},
+                "interior_closed_m": {"center": [0.289, y], "size": [0.072, 0.072, 0.031], "wall_height_m": 0.016},
             })
     d["cabinet"] = {
-        "box_m": {"min": [SIM_FRONT_X, -0.136, 0.0], "max": [SIM_FRONT_X + 0.09, 0.136, 0.14]},
+        "front_x_m": SIM_FRONT_X,
+        "box_m": {"min": [SIM_FRONT_X, -0.1245, 0.0], "max": [0.335, 0.1245, 0.14]},
         "pull_axis": [-1.0, 0.0, 0.0],
         "open_m": SIM_OPEN_M,
-        "handle_grasp": {"approach": [1, 0, 0], "jaw_axis": [0, 0, 1], "pregrasp_m": 0.04, "close_value": 0},
-        "pick_jaw_axis": [-1, 0, 0],
+        "interior_m": {"width": 0.072, "depth": 0.072, "wall_height": 0.016},
+        "handle_grasp": {"approach": None, "jaw_axis": [0.0, 0.0, 1.0], "pregrasp_m": 0.04, "far_m": 0.08,
+                         "preshape_value": 55, "close_value": 0, "release_value": 55},
         "drawers": drawers,
     }
+    d["pick"] = {"jaw_yaw_deg": 180.0, "approach_tcp_height_above_support_m": 0.057}
     d["catalogue"] = {"colours": COLOURS, "shapes": SIM_SHAPES}
     d["handover"] = {"center_m": [0.10, 0.19], "size_m": [0.09, 0.09]}
     d["tcp"] = dict(d["tcp"], pad_extent_along_tool_z_m=[-0.0146, 0.0165])
-    c = calib.from_dict(d)
-    eye, target = (0.11, 0.0, 0.29), (SIM_FRONT_X, 0.0, 0.08)
-    q = kinematics.solve_ik(c.chain, c.look_pose_deg, eye, tool="camera", approach=[t - e for t, e in zip(target, eye)])
-    d["cabinet_look_pose_deg"] = [round(v, 3) for v in q]
+    d["cabinet_look_pose_deg"] = SIM_CABINET_LOOK
+    d["look_pose_deg"] = SIM_TABLE_LOOK
     return d
 
 

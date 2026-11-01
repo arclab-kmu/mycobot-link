@@ -5,7 +5,7 @@ import cabinet_scene as cs
 import pytest
 from test_pickplace import START, camera, sent, teleporting  # noqa: F401 (fixtures)
 
-from mycobot_brain import drawers, kinematics, pickplace
+from mycobot_brain import drawer_vlm, drawers, kinematics, pickplace
 
 FAST = dict(settle=0.02, gripper_wait=0.02, arrive_timeout=3.0)
 FIND = "노란색 원뿔 찾아서 꺼내 줘"
@@ -133,8 +133,10 @@ def test_a_drawer_the_vlm_does_not_see_open_is_pulled_again(link, camera, telepo
 
 def test_a_drawer_left_open_at_the_end_is_pushed_shut_again(link, camera, teleporting, tmp_path):
     """The VLM says r1c2 is still open after the push: one more push, then it checks again."""
-    shut_once = json.dumps({"seen": "one open", "open_drawers": ["r1c2"]})
     scene = cs.load()
+    fx = scene.fixture
+    box = drawer_vlm.tray_boxes(fx, scene.chain, scene.camera, fx.cabinet_look_pose_deg, fx.open_m)["r1c2"]
+    shut_once = json.dumps({"seen": "one open", "open_trays": [{"bbox_2d": box}]})
     w = cs.World(scene, OBJECTS)
     vlm = cs.CabinetVLM(w, tmp_path / "c", commands=COMMANDS, order=["r1c2"])
     calls = {"n": 0}
@@ -182,26 +184,34 @@ def test_put_retries_a_table_grasp_that_missed(link, camera, teleporting, tmp_pa
     assert purposes.count("table") == 2 and purposes.count("held") == 2
 
 
-SIM_OBJECTS = {
-    "yellow_cone": {"colour": "yellow", "shape": "cone", "drawer": "r1c1", "xy": [0.284, 0.019], "z": 0.063 + 0.013},
-    "orange_cone": {"colour": "orange", "shape": "cone", "drawer": "r1c1", "xy": [0.284, -0.019], "z": 0.063 + 0.013},
-    "yellow_cube": {"colour": "yellow", "shape": "cube", "drawer": "r2c2", "xy": [0.284, -0.088], "z": 0.103 + 0.0125},
-    "blue_sphere": {"colour": "blue", "shape": "sphere", "drawer": "r0c0", "xy": [0.284, 0.088], "z": 0.023 + 0.013},
+SIM_OBJECTS = {  # sim-scene's pair slots, 17.5 mm either side of the bay's centre line
+    "yellow_cone": {"colour": "yellow", "shape": "cone", "drawer": "r2c0", "xy": [0.289, 0.0985], "z": 0.103 + 0.013},
+    "orange_cone": {"colour": "orange", "shape": "cone", "drawer": "r2c0", "xy": [0.289, 0.0635], "z": 0.103 + 0.013},
+    "yellow_cube": {"colour": "yellow", "shape": "cube", "drawer": "r2c2", "xy": [0.289, -0.081], "z": 0.103 + 0.0125},
+    "blue_sphere": {"colour": "blue", "shape": "sphere", "drawer": "r0c0", "xy": [0.289, 0.081], "z": 0.023 + 0.013},
 }
 
 
 def test_on_sim_scene_numbers_the_knob_is_pinched_from_the_side_and_the_cone_found(link, camera, teleporting,
                                                                                     tmp_path, monkeypatch):
-    """sim-scene's cabinet as of 16:40 (work in progress there): knob gripped with the tool
-    level and the jaw vertical, 93 mm pull, a neighbour 38 mm beside the cone."""
+    """sim-scene's v2 calib: knob gripped with the tool level and the jaw vertical, the jaw only
+    preshaped to 55 around it, a 100 mm pull, the cone in the top-left drawer beside an orange one."""
     monkeypatch.setattr(cs, "load", cs.load_sim_like)
-    result, world, vlm = run(link, camera, teleporting, tmp_path, objects=SIM_OBJECTS, order=["r2c2", "r1c1"])
+    result, world, vlm = run(link, camera, teleporting, tmp_path, objects=SIM_OBJECTS, order=["r2c2", "r2c0"])
     assert result["ok"] is True, result
-    assert result["drawers_opened"] == ["r2c2", "r1c1"]
+    assert result["drawers_opened"] == ["r2c2", "r2c0"]
     assert world.in_handover("yellow_cone") and world.all_shut()
     assert not any(world.moved(o) for o in SIM_OBJECTS if o != "yellow_cone")
+    ev = events(tmp_path)
+    phase, at_knob = "", []
+    for e in ev:
+        phase = e["name"] if e["event"] == "phase" else phase
+        if e["event"] == "gripper" and phase.startswith(("open r", "close r")):
+            at_knob.append(e["value"])
+    assert at_knob and set(at_knob) == {55, 0}  # never 100 at a knob: it hits the handles above and below
     scene = cs.load_sim_like()
-    pull = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "open r1c1"]
+    pull = [e for e in ev if e["event"] == "move" and e["phase"] == "open r2c0"]
+    assert pull
     for e in pull:
         jaw = kinematics.column(scene.chain.pose(e["angles_deg"], "tcp"), 0)
         assert abs(jaw[2]) > 0.99  # jaw vertical the whole pull: the pads stay on the knob's top and bottom

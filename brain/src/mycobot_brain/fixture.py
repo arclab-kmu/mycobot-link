@@ -61,10 +61,20 @@ class Drawer:
     grasp_jaw: Optional[Vec] = None
     #: highest part of the drawer a carried object must clear (a full-height front panel); None: the walls.
     rim_z: Optional[float] = None
+    #: the handle's own centre with the drawer shut (``handle_closed`` is where the TCP goes, short of it)
+    knob: Optional[Vec] = None
+    #: tray wall height over the floor when the inner box's z is the clearance to the shelf above
+    wall_h: Optional[float] = None
+
+    @property
+    def knob_closed(self) -> Vec:
+        """Where to mark the handle in a picture."""
+        return self.knob if self.knob is not None else self.handle_closed
 
     @property
     def wall_top(self) -> float:
-        return max(self.floor_z + self.interior_size[2], self.rim_z if self.rim_z is not None else -1.0)
+        walls = self.wall_h if self.wall_h is not None else self.interior_size[2]
+        return max(self.floor_z + walls, self.rim_z if self.rim_z is not None else -1.0)
 
     @property
     def name_ko(self) -> str:
@@ -103,6 +113,10 @@ class Fixture:
     shapes: Dict[str, Shape]
     handover_center: Tuple[float, float]
     handover_size: Tuple[float, float]
+    #: gripper value to approach and let go of a handle: fully open can hit the handles above and below.
+    handle_open_value: Optional[int] = None
+    #: TCP over the support for the pre-grasp of a top-down pick, where the calib has checked reach
+    pick_above_m: Optional[float] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- where things are -------------------------------------------------------
@@ -118,6 +132,10 @@ class Fixture:
             return self.drawers[drawer_id]
         except KeyError:
             raise FixtureError(f"no drawer {drawer_id!r}; have {sorted(self.drawers)}") from None
+
+    def knob(self, d: Drawer, opening: float) -> Vec:
+        """The handle's centre with the drawer ``opening`` m out, for marking it in a picture."""
+        return tuple(h + opening * a for h, a in zip(d.knob_closed, self.pull_axis))  # type: ignore[return-value]
 
     def handle(self, d: Drawer, opening: float) -> Vec:
         """The handle's grasp point with the drawer pulled out ``opening`` m."""
@@ -218,7 +236,9 @@ def _bounds(parts: Any) -> Dict[str, List[float]]:
 
 def _shape(name: str, s: Dict[str, Any]) -> Shape:
     """A catalogue entry: height, how wide it stands, and the TCP height above its support for the grasp."""
-    if "width_m" in s or "diameter_m" in s:
+    if "diagonal_m" in s:  # a cube stands this wide when turned 45 deg
+        width = float(s["diagonal_m"])
+    elif "width_m" in s or "diameter_m" in s:
         width = float(s.get("width_m", s.get("diameter_m")))
     elif "radius_m" in s:
         width = 2 * float(s["radius_m"])
@@ -241,7 +261,12 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
         drawers = {}
         for row in cab["drawers"]:
             inner = row["interior_closed_m"]
-            own = row.get("handle_grasp") or {}
+            # Per-drawer heading: at the drawer's top level, or inside its own handle_grasp.
+            own = {**(row.get("handle_grasp") or {}), **{k: row[k] for k in ("approach", "jaw_axis") if k in row}}
+            wall_h = inner.get("wall_height_m", (cab.get("interior_m") or {}).get("wall_height"))
+            rim = row.get("front_top_z_m")
+            if rim is None and row.get("front_panel_z_m"):
+                rim = row["front_panel_z_m"][1]
             dr = Drawer(
                 id=str(row["id"]), row=int(row["row"]), col=int(row["col"]),
                 handle_closed=_vec(row["handle_closed_m"]),  # type: ignore[arg-type]
@@ -252,7 +277,9 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
                 topdown_pose_deg=_pose(row.get("topdown_pose_deg")),
                 grasp_approach=_unit(_vec(own["approach"])) if own.get("approach") else None,
                 grasp_jaw=_unit(_vec(own["jaw_axis"])) if own.get("jaw_axis") else None,
-                rim_z=float(row["front_top_z_m"]) if row.get("front_top_z_m") is not None else None,
+                rim_z=None if rim is None else float(rim),
+                knob=_vec(row["handle_center_closed_m"]) if row.get("handle_center_closed_m") else None,  # type: ignore[arg-type]
+                wall_h=None if wall_h is None else float(wall_h),
             )
             if dr.id != f"r{dr.row}c{dr.col}":
                 raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")
@@ -262,14 +289,22 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
         hand = d["handover"]
         jaw = grasp.get("jaw_axis")
         pick_jaw = cab.get("pick_jaw_axis")
+        if pick_jaw is None and (d.get("pick") or {}).get("jaw_yaw_deg") is not None:
+            yaw = math.radians(float(d["pick"]["jaw_yaw_deg"]))
+            pick_jaw = (math.cos(yaw), math.sin(yaw), 0.0)
+        pull = _unit(_vec(cab["pull_axis"]))
+        # No cabinet-wide heading (it differs per column): straight into the face as the fallback.
+        approach = grasp.get("approach") or (-pull[0], -pull[1], -pull[2])
+        open_value = grasp.get("preshape_value", grasp.get("release_value"))
+        pick_above = (d.get("pick") or {}).get("approach_tcp_height_above_support_m")
         return Fixture(
             drawers=drawers,
-            pull_axis=_unit(_vec(cab["pull_axis"])),
+            pull_axis=pull,
             open_m=float(cab["open_m"]),
             box_min=_vec(box["min"]),  # type: ignore[arg-type]
             box_max=_vec(box["max"]),  # type: ignore[arg-type]
             cabinet_look_pose_deg=_pose(d.get("cabinet_look_pose_deg", cab.get("look_pose_deg"))) or [],
-            grasp_approach=_unit(_vec(grasp.get("approach", (0.0, 0.0, -1.0)))),
+            grasp_approach=_unit(_vec(approach)),
             grasp_jaw=None if jaw is None else _unit(_vec(jaw)),
             pregrasp_m=float(grasp.get("pregrasp_m", 0.04)),
             handle_close_value=None if grasp.get("close_value") is None else int(grasp["close_value"]),
@@ -278,6 +313,8 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
             shapes=shapes,
             handover_center=_vec(hand["center_m"][:2], 2),  # type: ignore[arg-type]
             handover_size=_vec(hand["size_m"][:2], 2),  # type: ignore[arg-type]
+            handle_open_value=None if open_value is None else int(open_value),
+            pick_above_m=None if pick_above is None else float(pick_above),
         )
     except (KeyError, TypeError, IndexError) as exc:
         raise FixtureError(f"cabinet calib: {exc!r}") from exc

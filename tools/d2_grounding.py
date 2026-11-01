@@ -33,9 +33,11 @@ from mycobot_brain import drawer_vlm, planner
 
 TARGET = ("yellow", "cone")
 OPEN_M = 0.02  # a drawer out more than this is open
-#: drawer-view prompt variants: (floor hint, shape hints)
-DRAWER_VARIANTS = {"full": (True, True), "nofloor": (False, True), "plain": (False, False)}
-CABINET_VARIANTS = {"handles": True, "plain": False}
+#: drawer-view prompt variants: (floor hint, shape hints, colour hints)
+DRAWER_VARIANTS = {"full": (True, True, False), "nofloor": (False, True, False), "plain": (False, False, False),
+                   "colours": (True, True, True)}
+#: cabinet-view variants: which handle points the prompt gives (shut, shut and fully open, none)
+CABINET_VARIANTS = {"handles": "shut", "both": "both", "plain": None, "point": "point", "tray": "tray"}
 
 
 def _get(o: Dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -48,21 +50,29 @@ def _get(o: Dict[str, Any], *keys: str, default: Any = None) -> Any:
 def frames_from_truth(truth: Any, ground: Path) -> List[Dict[str, Any]]:
     """truth.json → [{image, view, drawer, angles_deg, objects: [...], open: {id: m}}].
 
-    Accepts ``colour``/``color`` and ``center_px``/``pixel``; ``view`` is
-    topdown, tilted or cabinet.
+    ``objects`` may be a list or a dict by id; ``colour``/``color`` and
+    ``center_px``/``pixel`` are both read. An object counts as visible when it is
+    in the image and, if truth says so, some of its colour shows (``color_px``
+    is 0 behind a front panel or another object). In a drawer view the truth
+    set is the visible objects of that drawer; ``view`` is topdown, tilted or
+    cabinet.
     """
     out = []
     for r in truth["frames"]:
         view = _get(r, "view", "kind")
+        raw = _get(r, "objects", default=[]) or []
         objects = []
-        for o in _get(r, "objects", default=[]) or []:
+        for o in (raw.values() if isinstance(raw, dict) else raw):
+            shows = bool(_get(o, "in_image", "visible", default=True)) and o.get("color_px", 1) > 0
+            if view != "cabinet" and r.get("drawer") and o.get("in_drawer", r["drawer"]) != r["drawer"]:
+                shows = False
             objects.append({
                 "id": _get(o, "id", default=""),
                 "colour": _get(o, "colour", "color"),
                 "shape": o["shape"],
                 "pixel": [float(v) for v in _get(o, "center_px", "pixel")],
                 "bbox": [float(v) for v in o["bbox_px"]] if o.get("bbox_px") else None,
-                "visible": bool(_get(o, "in_image", "visible", default=True)),
+                "visible": shows,
             })
         opening = {}
         for did, v in (_get(r, "drawers", "open_m", default={}) or {}).items():
@@ -77,17 +87,29 @@ def ask(frame: Dict[str, Any], variant: str, scene: calib_mod.Calib, chat: Calla
     jpeg = frame["image"].read_bytes()
     q = frame["angles_deg"]
     if frame["view"] == "cabinet":
-        handles = None
-        if CABINET_VARIANTS[variant] and q is not None:
-            handles = {d.id: drawer_vlm.grid(scene.chain, k, q, d.handle_closed) for d in fx.drawers.values()}
-        req = drawer_vlm.build_cabinet_request(jpeg, fx, handles, goal="say which drawers are open")
-        parse = lambda r: drawer_vlm.parse_cabinet(r, fx, None)  # noqa: E731
+        mode = CABINET_VARIANTS[variant]
+        handles = handles_open = tracks = boxes = None
+        if mode in ("shut", "both") and q is not None:
+            handles = {d.id: drawer_vlm.grid(scene.chain, k, q, d.knob_closed) for d in fx.drawers.values()}
+        if mode == "both" and q is not None:
+            handles_open = {d.id: drawer_vlm.grid(scene.chain, k, q, fx.knob(d, fx.open_m)) for d in fx.drawers.values()}
+        if mode in ("point", "tray"):
+            if q is None:
+                return {"variant": variant, "error": "no angles_deg: nothing to match against", "latency_s": 0.0}
+            if mode == "point":
+                tracks = drawer_vlm.handle_tracks(fx, scene.chain, k, q)
+            else:
+                boxes = drawer_vlm.tray_boxes(fx, scene.chain, k, q, fx.open_m)
+        req = drawer_vlm.build_cabinet_request(jpeg, fx, handles, goal="say which drawers are open",
+                                               handles_open=handles_open, point=mode == "point",
+                                               tray=mode == "tray")
+        parse = lambda r: drawer_vlm.parse_cabinet(r, fx, None, tracks, boxes)  # noqa: E731
     else:
-        floor_hint, shape_hints = DRAWER_VARIANTS[variant]
+        floor_hint, shape_hints, colour_hints = DRAWER_VARIANTS[variant]
         d = fx.drawer(frame["drawer"])
         floor = drawer_vlm.floor_box(fx, d, fx.open_m, scene.chain, k, q) if floor_hint and q is not None else None
         req = drawer_vlm.build_drawer_request(jpeg, fx, d, floor, target=" ".join(TARGET), view=frame["view"],
-                                              shape_hints=shape_hints)
+                                              shape_hints=shape_hints, colour_hints=colour_hints)
         parse = lambda r: drawer_vlm.parse_drawer(r, fx, with_target=True, width=k.width, height=k.height)  # noqa: E731
     t0 = time.monotonic()
     try:
@@ -213,6 +235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--calib", type=Path, required=True)
     p.add_argument("--drawer-variants", default=",".join(DRAWER_VARIANTS))
     p.add_argument("--cabinet-variants", default=",".join(CABINET_VARIANTS))
+    p.add_argument("--views", default="topdown,tilted,cabinet", help="which frames to ask about")
     p.add_argument("--out", type=Path, help="default <ground>/d2-<time>")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--vllm-url", default=planner.DEFAULT_VLLM_URL)
@@ -230,13 +253,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         request["model"] = args.model
         return planner.chat(request, base_url=args.vllm_url)
 
-    jobs = [(f, v) for f in frames
-            for v in (args.cabinet_variants if f["view"] == "cabinet" else args.drawer_variants).split(",")]
+    # One job per frame, its variants in turn: vLLM 0.28 failed with "Expected a cached item for
+    # mm_hash" (HTTP 500) when the same image was in two requests at once.
+    views = args.views.split(",")
+    jobs = [(f, (args.cabinet_variants if f["view"] == "cabinet" else args.drawer_variants).split(","))
+            for f in frames if f["view"] in views]
     rows = []
     with concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
-        for (f, v), answer in zip(jobs, pool.map(lambda job: ask(job[0], job[1], scene, chat), jobs)):
-            score = score_cabinet(f, answer) if f["view"] == "cabinet" else score_drawer(f, answer)
-            rows.append({"image": f["image"].name, "view": f["view"], "drawer": f["drawer"], **answer, "score": score})
+        answers = pool.map(lambda job: [ask(job[0], v, scene, chat) for v in job[1]], jobs)
+        for (f, _), per_frame in zip(jobs, answers):
+            for answer in per_frame:
+                score = score_cabinet(f, answer) if f["view"] == "cabinet" else score_drawer(f, answer)
+                rows.append({"image": f["image"].name, "view": f["view"], "drawer": f["drawer"], **answer,
+                             "score": score})
     with open(out / "answers.jsonl", "w") as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")

@@ -111,6 +111,16 @@ def test_cabinet_parse_holds_next_to_the_candidates():
     with pytest.raises(PlannerError, match="next must be"):
         drawer_vlm.parse_cabinet(raw, f, ["r2c2"])
     assert drawer_vlm.parse_cabinet(raw.replace('"r0c0"', '"none"'), f, ["r2c2"])["next"] is None
+    twice = json.dumps({"seen": "x", "open_drawers": ["r1c1", "r1c1"]})
+    assert drawer_vlm.parse_cabinet(twice, f, None)["open_drawers"] == ["r1c1"]
+
+
+def test_the_schemas_use_no_keys_the_vllm_grammar_rejects():
+    # vLLM answered HTTP 400 "Unimplemented keys: uniqueItems" to every cabinet request in D2.
+    f = fx()
+    for schema in (drawer_vlm.cabinet_schema(f, None), drawer_vlm.cabinet_schema(f, ["r0c0"]),
+                   drawer_vlm.drawer_schema(f, True), drawer_vlm.parse_schema(f)):
+        assert "uniqueItems" not in json.dumps(schema)
 
 
 def test_the_cabinet_prompt_says_where_each_handle_is_in_the_image():
@@ -152,7 +162,7 @@ def test_fixture_errors_name_what_is_missing():
 
 
 def test_the_loader_takes_the_sim_scene_s_keys_too():
-    """Per-drawer handle headings, a full-height front, collision parts, radius/size shapes, a pick jaw."""
+    """Collision parts instead of a box, a cabinet-wide heading or radius/size shapes."""
     d = cs.scene_dict()
     cab = d["cabinet"]
     del cab["box_m"]
@@ -173,3 +183,44 @@ def test_the_loader_takes_the_sim_scene_s_keys_too():
     assert f.drawers["r0c0"].wall_top == 0.04 and f.drawers["r0c1"].wall_top == pytest.approx(0.005 + cs.INNER[2])
     assert f.shapes["cone"].width == pytest.approx(0.03) and f.shapes["cone"].grasp_height == 0.0205
     assert f.shapes["cube"].width == pytest.approx(0.025 * math.sqrt(2))
+
+
+def test_the_loader_reads_sim_scene_s_v2_calib():
+    """The layout of sim_calib_drawers.json v2: no cabinet-wide heading, approach and jaw at each
+    drawer's top level, a preshape value, the handle's centre apart from the TCP target, tray walls
+    lower than the shelf clearance, the pick section, a cube's diagonal."""
+    f = cs.load_sim_like().fixture
+    assert f.grasp_approach == (1.0, 0.0, 0.0)  # null in the file: straight into the face
+    r2c0, r1c1 = f.drawers["r2c0"], f.drawers["r1c1"]
+    a, j = f.handle_frame(r2c0)
+    assert a == pytest.approx((math.cos(math.radians(-20)), math.sin(math.radians(-20)), 0), abs=1e-6)
+    assert j == (0.0, 0.0, 1.0) and f.handle_frame(r1c1)[0][1] > 0.6  # middle column at +40 deg
+    assert f.handle_open_value == 55 and f.handle_close_value == 0
+    assert r2c0.knob_closed == (0.236, 0.081, 0.116) and r2c0.handle_closed == (0.2226, 0.081, 0.116)
+    assert f.knob(r2c0, f.open_m) == pytest.approx((0.136, 0.081, 0.116))
+    assert r1c1.rim_z == pytest.approx(0.0935) and r1c1.wall_top == pytest.approx(0.0935)  # the front, not the shelf
+    assert f.pick_jaw == pytest.approx((-1.0, 0.0, 0.0)) and f.pick_above_m == 0.057
+    assert f.shapes["cube"].width == 0.0354 and f.shapes["cone"].grasp_height == 0.019
+
+
+def test_boxed_trays_are_matched_to_drawers_by_where_they_would_be_fully_out():
+    f = fx()
+    c = cs.load()
+    q = f.cabinet_look_pose_deg
+    full = drawer_vlm.tray_boxes(f, c.chain, c.camera, q, f.open_m)
+    assert all(full.values())
+    b = full["r1c2"]
+    nudged = [b[0] + 15, b[1] - 10, b[2] + 10, b[3] - 5]  # the model's box is never exact
+    out = drawer_vlm.assign_trays([nudged, [0, 0, 40, 40]], full)
+    assert out["open_drawers"] == ["r1c2"] and out["dropped"][0]["box"] == [0, 0, 40, 40]
+    raw = json.dumps({"seen": "x", "open_trays": [{"bbox_2d": [b[2], b[3], b[0], b[1]]}]})  # corners swapped
+    assert drawer_vlm.parse_cabinet(raw, f, None, open_boxes=full)["open_drawers"] == ["r1c2"]
+    with pytest.raises(PlannerError, match="open_trays"):
+        drawer_vlm.parse_cabinet(json.dumps({"seen": "x", "open_drawers": []}), f, None, open_boxes=full)
+
+
+def test_pointed_handles_on_a_shut_handle_or_off_every_track_open_nothing():
+    tracks = {"r2c0": ((390, 500), (340, 820)), "r1c0": ((440, 575), (390, 880)), "r0c0": ((470, 640), (440, 930))}
+    out = drawer_vlm.assign_handles([(438, 578), (345, 800), (900, 100)], tracks)
+    assert out["open_drawers"] == ["r2c0"]
+    assert out["dropped"][0]["near"] == "a shut handle" and out["dropped"][1]["near"]["off"] > 70

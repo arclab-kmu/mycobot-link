@@ -277,10 +277,23 @@ class DrawerTask(PickPlace):
         raise PickPlaceError(f"handle of {d.id}: no grasp that holds over the whole pull ({why})")
 
     def _try_handle(self, d: Drawer, a: Vec, j: Optional[Vec], free: bool) -> "HandlePlan":
+        """The first IK branch, by seed, that holds the grip over the whole pull and back-off."""
+        # The table look pose first (an ordinary elbow-up arm, whatever the cabinet view needs), then
+        # the drawer's own look and the cabinet look: one seed's branch can run into a joint limit
+        # mid-pull where another's does not (r2c0 on sim-scene's numbers from v1's look pose).
+        seeds = [q for q in (self.calib.look_pose_deg, d.look_pose_deg, self.fx.cabinet_look_pose_deg) if q]
+        err: Exception = PickPlaceError("no seed pose")
+        for seed in seeds:
+            try:
+                return self._try_handle_from(d, a, j, free, seed)
+            except (IKError, PickPlaceError) as exc:
+                err = exc
+        raise err
+
+    def _try_handle_from(self, d: Drawer, a: Vec, j: Optional[Vec], free: bool,
+                         seed: Sequence[float]) -> "HandlePlan":
         fx, chain = self.fx, self.calib.chain
-        # Seeded from the table look pose: an ordinary elbow-up arm, whatever the cabinet view needs.
-        pre = kinematics.solve_ik(chain, self.calib.look_pose_deg, _add(fx.handle(d, 0.0), a, -fx.pregrasp_m),
-                                  approach=a, jaw=j)
+        pre = kinematics.solve_ik(chain, seed, _add(fx.handle(d, 0.0), a, -fx.pregrasp_m), approach=a, jaw=j)
         path = kinematics.line_path(chain, pre, fx.handle(d, 0.0), step_m=0.02, approach=a, jaw=j)
         path += kinematics.line_path(chain, path[-1], fx.handle(d, fx.open_m), step_m=self.s.line_step_m,
                                      approach=None if free else a, jaw=j)
@@ -305,7 +318,8 @@ class DrawerTask(PickPlace):
         near = min(plan.frames, key=lambda o: abs(o - start))
         a, j = plan.frames[near]
         self._phase(f"{verb} {d.id}")
-        self._gripper(c.gripper_open, "open")
+        release = fx.handle_open_value if fx.handle_open_value is not None else c.gripper_open
+        self._gripper(release, "open")
         try:
             q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.handle(d, start), a, -fx.pregrasp_m),
                                     approach=a, jaw=j)
@@ -317,7 +331,7 @@ class DrawerTask(PickPlace):
         self._gripper(close, "close")
         self._line(fx.handle(d, end), f"{verb} {d.id}", None if plan.free else a, j, speed=self.s.handle_speed)
         self.opening[d.id] = end
-        self._gripper(c.gripper_open, "open")
+        self._gripper(release, "open")
         # Back off along the tool axis as it is now: with a free heading it has turned on the way.
         t = c.chain.pose(self._measured(), "tcp")
         a_now, j_now = kinematics.column(t, 2), (kinematics.column(t, 0) if j is not None else None)
@@ -373,8 +387,10 @@ class DrawerTask(PickPlace):
         k, chain = self.calib.camera, self.calib.chain
         frame, q = self._look()
         floor = drawer_vlm.floor_box(self.fx, d, self.fx.open_m, chain, k, q)
+        # D2 (sim, 18 tilted frames): colour hints took colour right 0.938 -> 0.969; the floor box and
+        # shape hints made no difference there and stay. The tilted view sees shapes (0.97 vs 0.69).
         req = drawer_vlm.build_drawer_request(frame.jpeg, self.fx, d, floor, target=target, view=self.s.view,
-                                              **({"model": self.model} if self.model else {}))
+                                              colour_hints=True, **({"model": self.model} if self.model else {}))
         raw = self._ask(f"drawer-{d.id}", req, [frame.jpeg], q)
         look = self._reply(f"drawer-{d.id}", raw, lambda r: drawer_vlm.parse_drawer(
             r, self.fx, with_target=target is not None, width=k.width, height=k.height))
@@ -403,13 +419,17 @@ class DrawerTask(PickPlace):
                  candidates: Optional[Sequence[str]]) -> Dict[str, Any]:
         c, fx = self.calib, self.fx
         frame, q = self._look()
-        handles = {d.id: drawer_vlm.grid(c.chain, c.camera, q, d.handle_closed) for d in fx.drawers.values()}
-        req = drawer_vlm.build_cabinet_request(frame.jpeg, fx, handles, goal=goal, searched=searched,
-                                               candidates=candidates,
+        # The model boxes the pulled-out trays and code says whose they are. D2 (sim, 10 cabinet
+        # frames, 9 open drawers): naming drawers went by up and down in sim-scene's rolled view
+        # (open recall 0.33-0.44, also with handle marks); pointing at open handles 0.67; boxed trays
+        # 0.89 with precision 0.89-1.0.
+        trays = drawer_vlm.tray_boxes(fx, c.chain, c.camera, q, fx.open_m)
+        req = drawer_vlm.build_cabinet_request(frame.jpeg, fx, None, goal=goal, searched=searched,
+                                               candidates=candidates, tray=True,
                                                **({"model": self.model} if self.model else {}))
         purpose = "cabinet-next" if candidates is not None else "cabinet-shut"
         raw = self._ask(purpose, req, [frame.jpeg], q)
-        return self._reply(purpose, raw, lambda r: drawer_vlm.parse_cabinet(r, fx, candidates))
+        return self._reply(purpose, raw, lambda r: drawer_vlm.parse_cabinet(r, fx, candidates, open_boxes=trays))
 
     # -- objects ----------------------------------------------------------------------
 
@@ -492,7 +512,11 @@ class DrawerTask(PickPlace):
                 if found["pick"]["visible"]:
                     xyz = self._estimate(found["pick"], qa, plane, "pick", "close")
         grasp_z = max(surface_z + shape.grasp_height, surface_z + c.pad_below_tcp + s.finger_clear_m)
-        above = (xyz[0], xyz[1], max(clear, grasp_z + 0.03) + s.pregrasp_m / 2)
+        if self.fx.pick_above_m is not None:
+            # The calib's height: a top-row drawer's floor is high enough that ours is out of reach.
+            above = (xyz[0], xyz[1], max(clear, surface_z + self.fx.pick_above_m))
+        else:
+            above = (xyz[0], xyz[1], max(clear, grasp_z + 0.03) + s.pregrasp_m / 2)
         jaw = self._jaw(drawer, xyz, others)
         approach = DOWN if jaw is not None else self._approach(above, (xyz[0], xyz[1], grasp_z), "grasp")
         self._phase(f"pre-grasp: {where}")
@@ -501,8 +525,10 @@ class DrawerTask(PickPlace):
         self._line((xyz[0], xyz[1], grasp_z), "descend", approach, jaw)
         self._gripper(c.gripper_closed, "close")
         self._phase("lift")
-        # Lift until the object's bottom (grasp_height under the TCP) clears the walls or the table.
-        lift = max(above[2], top + shape.grasp_height + s.wall_clear_m)
+        # Lift until the object's bottom (grasp_height under the TCP) clears the walls or the table,
+        # by wall_clear_m where the arm reaches that high, else by 6 mm (sim-scene's figure).
+        lift = self._reachable_z(xyz, [max(above[2], top + shape.grasp_height + s.wall_clear_m),
+                                       max(above[2], top + shape.grasp_height + 0.006)], approach, jaw)
         self._line((xyz[0], xyz[1], lift), "lift", approach, jaw)
         self._phase("check held")
         if view is not None:
@@ -521,8 +547,14 @@ class DrawerTask(PickPlace):
         """Carry what is held over ``xyz``, lower until its bottom is ``clear`` over the surface, let go."""
         s, c = self.s, self.calib
         release_z = surface_z + shape.grasp_height + clear
-        carry = max(release_z, (wall_top or surface_z) + shape.grasp_height + s.wall_clear_m) + 0.03
+        least = max(release_z, (wall_top or surface_z) + shape.grasp_height + s.wall_clear_m)
+        carry = self._reachable_z(xyz, [least + 0.03, least + 0.015, least], DOWN, None)
         self._phase(f"carry: {where}")
+        # Up first where it is: the joint move across may not dip below the carry floor, and the
+        # object may have come off a lower surface (the table) than the one it goes to.
+        here = kinematics.position(c.chain.pose(self._measured(), "tcp"))
+        if here[2] < carry - 0.005:
+            self._line((here[0], here[1], carry), f"raise: {where}", DOWN)
         q = self._ik(self._measured(), (xyz[0], xyz[1], carry), DOWN)
         self._goto(q, f"carry: {where}", floor=surface_z + shape.grasp_height + 0.01)
         self._phase(f"lower: {where}")
@@ -530,6 +562,18 @@ class DrawerTask(PickPlace):
         self._gripper(c.gripper_open, "open")
         self._phase("retreat")
         self._line((xyz[0], xyz[1], carry), "retreat", DOWN)
+
+    def _reachable_z(self, xyz: Sequence[float], heights: Sequence[float], approach: Optional[Vec],
+                     jaw: Optional[Vec]) -> float:
+        """The first of ``heights`` (best first) the arm reaches over ``xyz`` with that grip."""
+        for z in heights:
+            try:
+                kinematics.solve_ik(self.calib.chain, self._measured(), (xyz[0], xyz[1], z), tool="tcp",
+                                    approach=approach if approach is not None else DOWN, jaw=jaw)
+                return z
+            except IKError:
+                continue
+        raise PickPlaceError(f"out of reach over {_r(xyz, 3)} at every height {_r(heights, 3)}")
 
     # -- staying out of the cabinet -------------------------------------------------
 
