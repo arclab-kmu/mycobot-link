@@ -324,6 +324,7 @@ def sim_like_dict():
         "interior_m": {"width": 0.072, "depth": 0.072, "wall_height": 0.016},
         "handle_grasp": {"approach": None, "jaw_axis": [0.0, 0.0, 1.0], "pregrasp_m": 0.04, "far_m": 0.08,
                          "preshape_value": 55, "close_value": 0, "release_value": 55},
+        "handle_m": {"protrusion": 0.018, "width": 0.032, "height": 0.024},
         "drawers": drawers,
     }
     d["pick"] = {"jaw_yaw_deg": 180.0, "approach_tcp_height_above_support_m": 0.057}

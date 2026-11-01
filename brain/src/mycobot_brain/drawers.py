@@ -296,7 +296,7 @@ class DrawerTask(PickPlace):
     def _try_handle_from(self, d: Drawer, a: Vec, j: Optional[Vec], free: bool,
                          seed: Sequence[float]) -> "HandlePlan":
         fx, chain = self.fx, self.calib.chain
-        pre = kinematics.solve_ik(chain, seed, _add(fx.handle(d, 0.0), a, -fx.pregrasp_m), approach=a, jaw=j)
+        pre = kinematics.solve_ik(chain, seed, _add(fx.handle(d, 0.0), a, -fx.standoff_m), approach=a, jaw=j)
         path = kinematics.line_path(chain, pre, fx.handle(d, 0.0), step_m=0.02, approach=a, jaw=j)
         path += kinematics.line_path(chain, path[-1], fx.handle(d, fx.open_m), step_m=self.s.line_step_m,
                                      approach=None if free else a, jaw=j)
@@ -305,12 +305,23 @@ class DrawerTask(PickPlace):
         drift = math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(a, a1)))))
         if drift > self.s.yaw_drift_deg:
             raise PickPlaceError(f"the gripper turns {drift:.0f} deg over the pull")
-        back = kinematics.line_path(chain, path[-1], _add(fx.handle(d, fx.open_m), a1, -fx.pregrasp_m), step_m=0.02,
+        back = kinematics.line_path(chain, path[-1], _add(fx.handle(d, fx.open_m), a1, -fx.standoff_m), step_m=0.02,
                                     approach=a1, jaw=j1)
         # A tipped or turned gripper leans its back (and the camera) towards the cabinet face.
-        hit = self._path_clear([pre] + path + back, skip=d.id)
+        hit = self._path_clear([pre] + path + back, skip=d.id, at_handle=True)
         if hit:
             raise PickPlaceError(f"the {hit}")
+        # Joint moves between the cabinet look and the standoffs, shut and open, must keep the
+        # gripper off every handle (D3 s500: rising from a 4 cm back-off it caught the knob above).
+        look = fx.cabinet_look_pose_deg
+        if look:
+            # Shut, the pre-grasp is also where a push backs off to.
+            for name, q in (("standoff shut", pre), ("standoff open", back[-1])):
+                for there, other in ((look, q), (q, look)):
+                    jp = kinematics.joint_path(there, other, self.s.max_step)
+                    hit = self._path_clear(jp, skip=d.id if name == "standoff open" else None)
+                    if hit:
+                        raise PickPlaceError(f"cabinet look <-> {name}: the {hit}")
         return HandlePlan(frames={0.0: (a, j), fx.open_m: (a1, j1)}, free=free,
                           seeds={0.0: pre, fx.open_m: back[-1]})
 
@@ -330,7 +341,7 @@ class DrawerTask(PickPlace):
         if look and max(abs(a - b) for a, b in zip(here, look)) > 1.0:
             self._goto(look, f"{verb} {d.id}: cabinet look", floor=None)
         try:
-            q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.handle(d, start), a, -fx.pregrasp_m),
+            q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.handle(d, start), a, -fx.standoff_m),
                                     approach=a, jaw=j)
         except IKError as exc:
             raise PickPlaceError(f"{verb} {d.id}: pre-grasp: {exc}") from exc
@@ -344,7 +355,7 @@ class DrawerTask(PickPlace):
         # Back off along the tool axis as it is now: with a free heading it has turned on the way.
         t = c.chain.pose(self._measured(), "tcp")
         a_now, j_now = kinematics.column(t, 2), (kinematics.column(t, 0) if j is not None else None)
-        self._line(_add(fx.handle(d, end), a_now, -fx.pregrasp_m), f"{verb} {d.id}: back off", a_now, j_now)
+        self._line(_add(fx.handle(d, end), a_now, -fx.standoff_m), f"{verb} {d.id}: back off", a_now, j_now)
 
     def _open(self, d: Drawer, again: bool = False) -> None:
         # ``again``: the VLM does not see it open, so pull from shut whatever the code thinks.
@@ -643,10 +654,13 @@ class DrawerTask(PickPlace):
 
     # -- staying out of the cabinet -------------------------------------------------
 
-    def _path_clear(self, path: Sequence[Sequence[float]], skip: Optional[str] = None) -> Optional[str]:
-        """None if the TCP and camera stay out of the cabinet body and of open drawers (but ``skip``)."""
+    def _path_clear(self, path: Sequence[Sequence[float]], skip: Optional[str] = None,
+                    at_handle: bool = False) -> Optional[str]:
+        """None if the TCP, the pad tips and the camera stay out of the cabinet and of open drawers (but
+        ``skip``). The cabinet counts its closed handles, except on a move ``at_handle``, which goes to one."""
         fx, chain, m = self.fx, self.calib.chain, self.s.body_clear_m
-        boxes = [("cabinet", fx.box_min, fx.box_max)]
+        lo, hi = (fx.box_min, fx.box_max) if at_handle else fx.body_box()
+        boxes = [("cabinet", lo, hi)]
         for d_id, opening in self.opening.items():
             if opening > 1e-3 and d_id != skip:
                 d = fx.drawers[d_id]
@@ -654,11 +668,15 @@ class DrawerTask(PickPlace):
                 hx, hy = d.interior_size[0] / 2 + 0.005, d.interior_size[1] / 2 + 0.005
                 boxes.append((f"open {d_id}", (c[0] - hx, c[1] - hy, d.floor_z - 0.01),
                               (c[0] + hx, c[1] + hy, d.floor_z + d.interior_size[2])))
+        tip = self.calib.pad_below_tcp
         for q in path:
-            for tool in ("tcp", "camera"):
-                p = kinematics.position(chain.pose(q, tool))
-                for name, lo, hi in boxes:
-                    if _in_box(p, lo, hi, m):
+            t = chain.pose(q, "tcp")
+            points = [("tcp", kinematics.position(t)), ("camera", kinematics.position(chain.pose(q, "camera")))]
+            if not at_handle and tip > 0:
+                points.append(("pad tips", _add(kinematics.position(t), kinematics.column(t, 2), tip)))
+            for tool, p in points:
+                for name, b_lo, b_hi in boxes:
+                    if _in_box(p, b_lo, b_hi, m):
                         return f"{tool} at {_r(p, 3)} inside the {name}"
         return None
 

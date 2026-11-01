@@ -257,3 +257,17 @@ def test_on_sim_scene_numbers_a_take_starts_its_close_look_from_a_low_side_view(
                            objects=objects)
     assert result["ok"] is True, result
     assert world.in_handover("red_cone") and world.all_shut()
+
+
+def test_joint_moves_keep_the_pad_tips_off_the_handles(tmp_path):
+    """D3 s500: backed off 4 cm from r0c1's handle, the joint move up to the cabinet look caught the
+    handle above (r1c1 came out 8 mm) and stalled. The cabinet now counts its handles and the pad
+    tips are checked; the approach and back-off stand 8 cm off (sim-scene's far_m)."""
+    scene = cs.load_sim_like()
+    task = drawers.DrawerTask(None, None, scene, None, pickplace.RunLog(tmp_path), drawers.DrawerSettings())
+    back_off_4cm = [-27.71, -65.94, -97.77, -16.48, 112.29, -135.08]  # measured in s500
+    path = kinematics.joint_path(back_off_4cm, scene.fixture.cabinet_look_pose_deg, 8.0)
+    assert "pad tips" in task._path_clear(path) and task._path_clear(path, at_handle=True) is None
+    assert scene.fixture.standoff_m == 0.08
+    for d in scene.fixture.drawers.values():
+        task._handle_plan(d)  # every handle: look <-> standoff, shut and open, clear of the others

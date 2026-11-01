@@ -204,6 +204,8 @@ def test_the_loader_reads_sim_scene_s_v2_calib():
     assert r1c1.rim_z == pytest.approx(0.0935) and r1c1.wall_top == pytest.approx(0.0935)  # the front, not the shelf
     assert f.pick_jaw == pytest.approx((-1.0, 0.0, 0.0)) and f.pick_above_m == 0.057
     assert f.shapes["cube"].width == 0.0354 and f.shapes["cone"].grasp_height == 0.019
+    assert f.far_m == 0.08 and f.standoff_m == 0.08
+    assert f.body_box()[0] == pytest.approx((0.245 - 0.018, -0.1245, 0.0))  # handles stick out towards the robot
 
 
 def test_boxed_trays_are_matched_to_drawers_by_where_they_would_be_fully_out():

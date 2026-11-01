@@ -117,6 +117,10 @@ class Fixture:
     handle_open_value: Optional[int] = None
     #: TCP over the support for the pre-grasp of a top-down pick, where the calib has checked reach
     pick_above_m: Optional[float] = None
+    #: standoff from a handle to start the approach and end the back-off (sim-scene's oracle: 8 cm)
+    far_m: Optional[float] = None
+    #: how far closed handles stick out of the cabinet body towards the robot
+    handle_protrusion_m: float = 0.0
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- where things are -------------------------------------------------------
@@ -132,6 +136,21 @@ class Fixture:
             return self.drawers[drawer_id]
         except KeyError:
             raise FixtureError(f"no drawer {drawer_id!r}; have {sorted(self.drawers)}") from None
+
+    @property
+    def standoff_m(self) -> float:
+        """Where a handle approach starts and its back-off ends, off the handle along the tool axis."""
+        return max(self.far_m or 0.0, self.pregrasp_m)
+
+    def body_box(self) -> Tuple[Vec, Vec]:
+        """The cabinet body grown by the closed handles on the side they stick out of."""
+        lo, hi = list(self.box_min), list(self.box_max)
+        for i, a in enumerate(self.pull_axis):
+            if a < -0.5:
+                lo[i] -= self.handle_protrusion_m
+            elif a > 0.5:
+                hi[i] += self.handle_protrusion_m
+        return tuple(lo), tuple(hi)  # type: ignore[return-value]
 
     def knob(self, d: Drawer, opening: float) -> Vec:
         """The handle's centre with the drawer ``opening`` m out, for marking it in a picture."""
@@ -315,6 +334,8 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
             handover_size=_vec(hand["size_m"][:2], 2),  # type: ignore[arg-type]
             handle_open_value=None if open_value is None else int(open_value),
             pick_above_m=None if pick_above is None else float(pick_above),
+            far_m=None if grasp.get("far_m") is None else float(grasp["far_m"]),
+            handle_protrusion_m=float((cab.get("handle_m") or {}).get("protrusion", 0.0)),
         )
     except (KeyError, TypeError, IndexError) as exc:
         raise FixtureError(f"cabinet calib: {exc!r}") from exc
