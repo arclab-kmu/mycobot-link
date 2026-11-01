@@ -91,7 +91,9 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
 - `tools/g1_grounding.py`: VLM pixels vs sim truth. `tools/g3_sim_run.sh` (one
   seed: reset → record → `pick-place --execute` → truth) and `tools/g3_score.py`
   (pass/fail from the run's raw files). `tools/d2_grounding.py`: the drawer
-  prompts on sim-scene's ground frames, per view and prompt variant. Truth is
+  prompts on sim-scene's ground frames, per view and prompt variant.
+  `tools/d3_sim_run.sh` (one drawer run: reset with a layout → truth before →
+  record → `drawer --execute` → truth after) and `tools/d3_score.py`. Truth is
   read only by these.
 
 ## Relation to other repos
