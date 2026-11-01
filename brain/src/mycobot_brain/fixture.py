@@ -56,6 +56,15 @@ class Drawer:
     interior_size: Vec  # inner box along x, y, z
     look_pose_deg: Optional[List[float]] = None  # tilted view of the opened interior
     topdown_pose_deg: Optional[List[float]] = None
+    #: tool z / tool x at this handle when it differs from the cabinet's (a heading per column, say).
+    grasp_approach: Optional[Vec] = None
+    grasp_jaw: Optional[Vec] = None
+    #: highest part of the drawer a carried object must clear (a full-height front panel); None: the walls.
+    rim_z: Optional[float] = None
+
+    @property
+    def wall_top(self) -> float:
+        return max(self.floor_z + self.interior_size[2], self.rim_z if self.rim_z is not None else -1.0)
 
     @property
     def name_ko(self) -> str:
@@ -88,6 +97,8 @@ class Fixture:
     grasp_jaw: Optional[Vec]  # tool x at the handle; None leaves it free
     pregrasp_m: float
     handle_close_value: Optional[int]
+    #: jaw axis for a top-down pick in a drawer; None: whichever way has more room.
+    pick_jaw: Optional[Vec]
     colours: List[str]
     shapes: Dict[str, Shape]
     handover_center: Tuple[float, float]
@@ -95,6 +106,12 @@ class Fixture:
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- where things are -------------------------------------------------------
+
+    def handle_frame(self, d: Drawer) -> Tuple[Vec, Optional[Vec]]:
+        """Approach (tool z) and jaw (tool x) for ``d``'s handle."""
+        if d.grasp_approach is not None:
+            return d.grasp_approach, d.grasp_jaw
+        return self.grasp_approach, self.grasp_jaw
 
     def drawer(self, drawer_id: str) -> Drawer:
         try:
@@ -187,15 +204,44 @@ class Fixture:
             self.drawers.values(), key=lambda d: (-d.row, d.col)))
 
 
+def _bounds(parts: Any) -> Dict[str, List[float]]:
+    """The box around collision parts given as ``{name: {"center", "size"}}`` (or a list of them)."""
+    rows = parts.values() if isinstance(parts, dict) else parts
+    lo, hi = [math.inf] * 3, [-math.inf] * 3
+    for r in rows:
+        c, sz = (r["center"], r["size"]) if isinstance(r, dict) else r
+        for i in range(3):
+            lo[i] = min(lo[i], float(c[i]) - float(sz[i]) / 2)
+            hi[i] = max(hi[i], float(c[i]) + float(sz[i]) / 2)
+    return {"min": lo, "max": hi}
+
+
+def _shape(name: str, s: Dict[str, Any]) -> Shape:
+    """A catalogue entry: height, how wide it stands, and the TCP height above its support for the grasp."""
+    if "width_m" in s or "diameter_m" in s:
+        width = float(s.get("width_m", s.get("diameter_m")))
+    elif "radius_m" in s:
+        width = 2 * float(s["radius_m"])
+    elif "size_m" in s:
+        width = math.hypot(*[float(v) for v in s["size_m"][:2]])  # a cube turned 45 deg
+    else:
+        width = float(s.get("grasp_width_m", 0.03))
+    grasp = s.get("grasp_height_m", s.get("grasp_tcp_height_m"))
+    if grasp is None:
+        raise FixtureError(f"shape {name}: no grasp_height_m")
+    return Shape(name, float(s["height_m"]), width, float(grasp))
+
+
 def from_dict(d: Dict[str, Any]) -> Fixture:
     """The ``cabinet`` / ``catalogue`` / ``handover`` sections of a calib file."""
     try:
         cab = d["cabinet"]
         grasp = cab.get("handle_grasp", {})
-        box = cab["box_m"]
+        box = cab.get("box_m") or _bounds(cab["parts_m"])
         drawers = {}
         for row in cab["drawers"]:
             inner = row["interior_closed_m"]
+            own = row.get("handle_grasp") or {}
             dr = Drawer(
                 id=str(row["id"]), row=int(row["row"]), col=int(row["col"]),
                 handle_closed=_vec(row["handle_closed_m"]),  # type: ignore[arg-type]
@@ -204,17 +250,18 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
                 interior_size=_vec(inner["size"]),  # type: ignore[arg-type]
                 look_pose_deg=_pose(row.get("look_pose_deg")),
                 topdown_pose_deg=_pose(row.get("topdown_pose_deg")),
+                grasp_approach=_unit(_vec(own["approach"])) if own.get("approach") else None,
+                grasp_jaw=_unit(_vec(own["jaw_axis"])) if own.get("jaw_axis") else None,
+                rim_z=float(row["front_top_z_m"]) if row.get("front_top_z_m") is not None else None,
             )
             if dr.id != f"r{dr.row}c{dr.col}":
                 raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")
             drawers[dr.id] = dr
         cat = d["catalogue"]
-        shapes = {}
-        for name, s in cat["shapes"].items():
-            shapes[name] = Shape(name, float(s["height_m"]), float(s.get("width_m", s.get("diameter_m", 0.03))),
-                                 float(s["grasp_height_m"]))
+        shapes = {name: _shape(name, s) for name, s in cat["shapes"].items()}
         hand = d["handover"]
         jaw = grasp.get("jaw_axis")
+        pick_jaw = cab.get("pick_jaw_axis")
         return Fixture(
             drawers=drawers,
             pull_axis=_unit(_vec(cab["pull_axis"])),
@@ -226,6 +273,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
             grasp_jaw=None if jaw is None else _unit(_vec(jaw)),
             pregrasp_m=float(grasp.get("pregrasp_m", 0.04)),
             handle_close_value=None if grasp.get("close_value") is None else int(grasp["close_value"]),
+            pick_jaw=None if pick_jaw is None else _unit(_vec(pick_jaw)),
             colours=[str(c) for c in cat["colours"]],
             shapes=shapes,
             handover_center=_vec(hand["center_m"][:2], 2),  # type: ignore[arg-type]

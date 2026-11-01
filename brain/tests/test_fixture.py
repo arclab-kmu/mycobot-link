@@ -149,3 +149,27 @@ def test_fixture_errors_name_what_is_missing():
     with pytest.raises(calib.CalibError, match="handover"):
         calib.from_dict(d)
     assert issubclass(fixture.FixtureError, ValueError)
+
+
+def test_the_loader_takes_the_sim_scene_s_keys_too():
+    """Per-drawer handle headings, a full-height front, collision parts, radius/size shapes, a pick jaw."""
+    d = cs.scene_dict()
+    cab = d["cabinet"]
+    del cab["box_m"]
+    cab["parts_m"] = {"left": {"center": [0.3, 0.1, 0.05], "size": [0.1, 0.02, 0.1]},
+                      "right": {"center": [0.3, -0.1, 0.06], "size": [0.1, 0.02, 0.12]}}
+    cab["pick_jaw_axis"] = [-1, 0, 0]
+    cab["drawers"][0]["handle_grasp"] = {"approach": [0.94, -0.34, 0], "jaw_axis": [0, 0, 1]}
+    cab["drawers"][0]["front_top_z_m"] = 0.04
+    d["catalogue"]["shapes"] = {"cone": {"radius_m": 0.015, "height_m": 0.026, "grasp_tcp_height_m": 0.0205},
+                                "cube": {"size_m": [0.025, 0.025, 0.025], "height_m": 0.025,
+                                         "grasp_tcp_height_m": 0.0205}}
+    f = calib.from_dict(d).fixture
+    assert f.box_min == pytest.approx((0.25, -0.11, 0.0)) and f.box_max == pytest.approx((0.35, 0.11, 0.12))
+    assert f.pick_jaw == (-1.0, 0.0, 0.0)
+    a, j = f.handle_frame(f.drawers["r0c0"])
+    assert a == pytest.approx((0.94 / math.hypot(0.94, 0.34), -0.34 / math.hypot(0.94, 0.34), 0)) and j == (0, 0, 1)
+    assert f.handle_frame(f.drawers["r0c1"]) == (f.grasp_approach, f.grasp_jaw)
+    assert f.drawers["r0c0"].wall_top == 0.04 and f.drawers["r0c1"].wall_top == pytest.approx(0.005 + cs.INNER[2])
+    assert f.shapes["cone"].width == pytest.approx(0.03) and f.shapes["cone"].grasp_height == 0.0205
+    assert f.shapes["cube"].width == pytest.approx(0.025 * math.sqrt(2))

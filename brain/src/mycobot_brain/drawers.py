@@ -113,7 +113,7 @@ class DrawerTask(PickPlace):
             try:
                 a, _ = self._handle_frame(d)
                 reach[d.id] = round(math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(
-                    a, self.fx.grasp_approach))))), 1)
+                    a, self.fx.handle_frame(d)[0]))))), 1)
             except PickPlaceError:
                 reach[d.id] = None
         self.log.event("plan", command=cmd, handle_tilt_deg=reach)
@@ -222,7 +222,7 @@ class DrawerTask(PickPlace):
         if d.id in self._frames:
             return self._frames[d.id][:2]
         fx, chain = self.fx, self.calib.chain
-        a0, j0 = fx.grasp_approach, fx.grasp_jaw
+        a0, j0 = fx.handle_frame(d)
         h = fx.handle(d, fx.open_m)
         r = math.hypot(h[0], h[1])
         inward = (-h[0] / r, -h[1] / r, 0.0)
@@ -288,17 +288,24 @@ class DrawerTask(PickPlace):
         self._move_handle(d, start, 0.0, "close")
 
     def _look_pose(self, d: Drawer) -> List[float]:
+        """The calib's view into the opened drawer, else one aimed at its floor from the robot's side."""
         pose = d.topdown_pose_deg if self.s.view == "topdown" else d.look_pose_deg
         if pose is not None:
             return pose
         c = self.fx.interior_center(d, self.fx.open_m)
         target = (c[0], c[1], c[2] + 0.01)
         tilt = 0.0 if self.s.view == "topdown" else self.s.look_tilt_deg
-        try:
-            return kinematics.look_at(self.calib.chain, self._measured(), target, distance=self.s.look_distance_m,
-                                      tilt_deg=tilt)
-        except IKError as exc:
-            raise PickPlaceError(f"no {self.s.view} view into {d.id}: {exc}") from exc
+        dist = self.s.look_distance_m
+        why = ""
+        # Near the edge of reach the answer depends on the seed and a centimetre or a few degrees.
+        for seed in (self._measured(), self.calib.look_pose_deg):
+            for dd, dt in ((0.0, 0.0), (0.02, 5.0), (-0.02, -5.0), (0.03, 10.0)):
+                try:
+                    return kinematics.look_at(self.calib.chain, seed, target, distance=dist + dd,
+                                              tilt_deg=max(0.0, tilt + dt) if tilt else 0.0)
+                except IKError as exc:
+                    why = str(exc)
+        raise PickPlaceError(f"no {self.s.view} view into {d.id}: {why}")
 
     def _open_and_look(self, d: Drawer, target: Optional[str]) -> Dict[str, Any]:
         """Open ``d`` and say what is in it; one more pull if the VLM does not see it open."""
@@ -338,7 +345,7 @@ class DrawerTask(PickPlace):
         return kinematics.pixel_to_plane(c.chain, c.camera, q, *o["pixel"], d.floor_z + shape.height / 2)
 
     def _wall_top(self, d: Drawer) -> float:
-        return d.floor_z + d.interior_size[2]
+        return d.wall_top
 
     def _shape(self, name: str) -> Shape:
         if name not in self.fx.shapes:
@@ -367,8 +374,10 @@ class DrawerTask(PickPlace):
                 raise PickPlaceError(f"the ray to the {desc} never meets the floor of {d.id}")
             if not self.fx.inside(d, xyz, self.fx.open_m, margin=-0.01):
                 raise PickPlaceError(f"the {desc} at {_r(xyz, 3)} is not over the floor of {d.id}")
+            others = [p for o in look["objects"] if o is not obj
+                      for p in [self._object_xyz(d, o, look["angles"])] if p is not None]
             try:
-                self._pick_up(xyz, d.floor_z, shape, desc, d.id, wall_top=self._wall_top(d), drawer=d)
+                self._pick_up(xyz, d.floor_z, shape, desc, d.id, wall_top=self._wall_top(d), drawer=d, others=others)
                 break
             except NotHeld:
                 if attempt == self.s.attempts:
@@ -391,21 +400,31 @@ class DrawerTask(PickPlace):
             raise PickPlaceError(f"the {desc} is not in the handover zone: {check['seen']}")
         self._close(d)
 
-    def _jaw(self, d: Optional[Drawer], xyz: Sequence[float]) -> Optional[Vec]:
-        """In a drawer, close the jaws along the way with more room to the walls."""
+    def _jaw(self, d: Optional[Drawer], xyz: Sequence[float], others: Sequence[Sequence[float]] = ()) -> Optional[Vec]:
+        """In a drawer, the calib's pick jaw axis, or the way with more room: the open
+        jaws reach ~23 mm each side, and a neighbour in their path is as bad as a wall."""
         if d is None:
             return None
         fx = self.fx
+        if fx.pick_jaw is not None:
+            return fx.pick_jaw
         a, b = fx.axes()
         c = fx.interior_center(d, self.opening[d.id])
         along, across = fx.extent(d)
         rel = (xyz[0] - c[0], xyz[1] - c[1], 0.0)
-        room_a = along / 2 - abs(kinematics.dot(rel, a))
-        room_b = across / 2 - abs(kinematics.dot(rel, b))
-        return a if room_a >= room_b else b
+        room = {}
+        for axis, extent, side in ((a, along, b), (b, across, a)):
+            r = extent / 2 - abs(kinematics.dot(rel, axis))
+            for o in others:
+                off = (o[0] - xyz[0], o[1] - xyz[1], 0.0)
+                if abs(kinematics.dot(off, side)) < 0.025:  # pad half width + a neighbour's half width
+                    r = min(r, abs(kinematics.dot(off, axis)) - 0.015)
+            room[axis] = r
+        return a if room[a] >= room[b] else b
 
     def _pick_up(self, xyz: Vec, surface_z: float, shape: Shape, desc: str, where: str,
-              wall_top: Optional[float] = None, drawer: Optional[Drawer] = None) -> None:
+                 wall_top: Optional[float] = None, drawer: Optional[Drawer] = None,
+                 others: Sequence[Sequence[float]] = ()) -> None:
         """Close look and refine, then down, close, up, and the VLM says whether it is held."""
         s, c = self.s, self.calib
         plane = surface_z + shape.height / 2
@@ -427,7 +446,7 @@ class DrawerTask(PickPlace):
                     xyz = self._estimate(found["pick"], qa, plane, "pick", "close")
         grasp_z = max(surface_z + shape.grasp_height, surface_z + c.pad_below_tcp + s.finger_clear_m)
         above = (xyz[0], xyz[1], max(clear, grasp_z + 0.03) + s.pregrasp_m / 2)
-        jaw = self._jaw(drawer, xyz)
+        jaw = self._jaw(drawer, xyz, others)
         approach = DOWN if jaw is not None else self._approach(above, (xyz[0], xyz[1], grasp_z), "grasp")
         self._phase(f"pre-grasp: {where}")
         self._goto(self._ik(self._measured(), above, approach, jaw), f"pre-grasp: {where}", floor=clear)

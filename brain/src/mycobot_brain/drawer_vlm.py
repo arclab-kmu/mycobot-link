@@ -153,7 +153,7 @@ def cabinet_schema(fx: Fixture, candidates: Optional[Sequence[str]]) -> Dict[str
 def build_cabinet_request(
     jpeg: bytes,
     fx: Fixture,
-    handles: Dict[str, Optional[Tuple[int, int]]],
+    handles: Optional[Dict[str, Optional[Tuple[int, int]]]],
     *,
     goal: str,
     searched: Optional[Dict[str, str]] = None,
@@ -162,18 +162,23 @@ def build_cabinet_request(
 ) -> Dict[str, Any]:
     """Which drawers are open; with ``candidates``, also which of them to search next.
 
-    ``handles`` maps each drawer to where its handle (shut) is on the 0-1000 grid.
+    ``handles`` maps each drawer to where its handle (shut) is on the 0-1000 grid; None leaves the hint out.
     ``searched`` is what earlier looks found in the drawers already opened.
     """
     lines = [
         "You are the eyes of a small robot arm. The image is the arm's camera looking at the front of a cabinet "
         "of 3x3 small drawers. Rows r0 (bottom) to r2 (top); columns c0 (the robot's left) to c2 (right).",
-        "Where each drawer's handle is in the image when the drawer is shut (x, y on a 0-1000 grid, 0,0 top left):",
     ]
-    for did in sorted(fx.drawers, key=lambda i: (-fx.drawers[i].row, fx.drawers[i].col)):
-        g = handles.get(did)
-        where = f"({g[0]}, {g[1]})" if g else "outside the image"
-        lines.append(f"  {did} ({fx.drawers[did].name_ko} 서랍): {where}")
+    if handles:
+        lines.append("Where each drawer's handle is in the image when the drawer is shut "
+                     "(x, y on a 0-1000 grid, 0,0 top left):")
+        for did in sorted(fx.drawers, key=lambda i: (-fx.drawers[i].row, fx.drawers[i].col)):
+            g = handles.get(did)
+            where = f"({g[0]}, {g[1]})" if g else "outside the image"
+            lines.append(f"  {did} ({fx.drawers[did].name_ko} 서랍): {where}")
+    else:
+        lines.append("Drawers: " + "; ".join(f"{d.id} = {d.name_ko} 서랍" for d in sorted(
+            fx.drawers.values(), key=lambda d: (-d.row, d.col))) + ".")
     lines.append("open_drawers: every drawer that is pulled out, even a little; [] if all are shut.")
     if candidates is not None:
         lines.append(f"Goal: {goal}.")
@@ -232,11 +237,13 @@ def build_drawer_request(
     *,
     target: Optional[str] = None,
     view: str = "tilted",
+    shape_hints: bool = True,
     model: str = DEFAULT_MODEL,
 ) -> Dict[str, Any]:
     """What is in drawer ``d``, opened; with ``target`` (e.g. "yellow cone"), which one that is.
 
-    ``floor`` is where the drawer floor should be in the image (0-1000 box).
+    ``floor`` is where the drawer floor should be in the image (0-1000 box), None to leave it out.
+    ``shape_hints`` describes each shape in a few words (D2 measures whether that helps).
     """
     where = (f"If it is pulled out, its floor fills about x {floor[0]}-{floor[2]}, y {floor[1]}-{floor[3]} "
              "of the 0-1000 grid. " if floor else "")
@@ -248,9 +255,11 @@ def build_drawer_request(
         "open: true if the drawer is pulled out so you see its floor.",
         "objects: every object inside this drawer, at most "
         f"{MAX_OBJECTS}; nothing outside it. For each: colour ({', '.join(fx.colours)}), "
-        "shape (" + "; ".join(f"{s} = {SHAPE_HINTS.get(s, s)}" for s in sorted(fx.shapes)) + "), and bbox_2d "
+        "shape (" + ("; ".join(f"{s} = {SHAPE_HINTS.get(s, s)}" for s in sorted(fx.shapes)) if shape_hints
+                     else ", ".join(sorted(fx.shapes))) + "), and bbox_2d "
         "[x1, y1, x2, y2], the tight box around it on a 0-1000 grid (x 0 left to 1000 right, y 0 top to 1000 "
-        "bottom). Look at the outline: a cone and a cylinder both look round from straight above.",
+        "bottom)." + (" Look at the outline: a cone and a cylinder both look round from straight above."
+                      if shape_hints else ""),
     ]
     if target is not None:
         lines.append(f"target: the index in objects of the {target}, -1 if there is none in this drawer. "
