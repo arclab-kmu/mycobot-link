@@ -165,10 +165,13 @@ class DrawerTask(PickPlace):
     def _take(self, cmd: Dict[str, Any], desc: str) -> Dict[str, Any]:
         d = self.fx.drawer(cmd["drawer"])
         look = self._open_and_look(d, desc)
-        if look["target"] is None:
+        target = look["target"]
+        if target is None and desc == "any object" and look["objects"]:
+            target = 0  # the model's pick was not on the floor (a handle, say); anything that is will do
+        if target is None:
             self._close(d)
             return {"ok": False, "why": f"no {desc} in {d.id}: {look['seen']}"}
-        obj = look["objects"][look["target"]]
+        obj = look["objects"][target]
         self._take_out(d, obj, look, drawer_vlm.describe(obj["colour"], obj["shape"]))
         return {"ok": True, "why": f"took the {obj['colour']} {obj['shape']} out of {d.id}"}
 
@@ -394,11 +397,20 @@ class DrawerTask(PickPlace):
         raw = self._ask(f"drawer-{d.id}", req, [frame.jpeg], q)
         look = self._reply(f"drawer-{d.id}", raw, lambda r: drawer_vlm.parse_drawer(
             r, self.fx, with_target=target is not None, width=k.width, height=k.height))
+        # Keep what stands on this drawer's floor. In D2 the model twice listed a top-row drawer's own
+        # dark handle as a "purple cube"; its ray meets the floor plane in front of the tray.
+        kept, target_at = [], None
         for i, o in enumerate(look["objects"]):
             xyz = self._object_xyz(d, o, q)
+            on_floor = xyz is not None and self.fx.inside(d, xyz, self.fx.open_m, margin=-0.01)
             self.log.event("estimate", role="object", drawer=d.id, index=i, label=f"{o['colour']} {o['shape']}",
-                           source=self.s.view, pixel=o["pixel"], xyz=None if xyz is None else _r(xyz, 4))
-        return {**look, "angles": q, "jpeg": frame.jpeg}
+                           source=self.s.view, pixel=o["pixel"], xyz=None if xyz is None else _r(xyz, 4),
+                           kept=on_floor)
+            if on_floor:
+                if look["target"] == i:
+                    target_at = len(kept)
+                kept.append(o)
+        return {**look, "objects": kept, "target": target_at, "angles": q, "jpeg": frame.jpeg}
 
     def _object_xyz(self, d: Drawer, o: Dict[str, Any], q: Sequence[float]) -> Optional[Vec]:
         shape = self.fx.shapes.get(o["shape"])

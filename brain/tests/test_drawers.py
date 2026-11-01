@@ -97,6 +97,34 @@ def test_take_hands_over_the_object_in_the_named_drawer(link, camera, teleportin
     assert world.all_shut()
 
 
+def test_a_handle_listed_as_an_object_is_left_out_and_a_real_one_taken(link, camera, teleporting, tmp_path):
+    """D2: the model boxed a top-row drawer's own handle as a "purple cube" and could name it the one."""
+    scene = cs.load()
+    w = cs.World(scene, OBJECTS)
+    vlm = cs.CabinetVLM(w, tmp_path, commands=COMMANDS)
+
+    def handle_too(request):
+        raw = vlm(request)
+        if request["response_format"]["json_schema"]["name"] != "drawer":
+            return raw
+        r = json.loads(raw)
+        g = drawer_vlm.grid(scene.chain, scene.camera, w.angles, scene.fixture.knob(scene.fixture.drawer("r0c0"),
+                                                                                   scene.fixture.open_m))
+        assert g is not None
+        r["objects"].insert(0, {"colour": "purple", "shape": "cube", "bbox_2d": [g[0] - 30, g[1] - 30, g[0] + 30, g[1] + 30]})
+        r["target"] = 0
+        return json.dumps(r)
+
+    s = drawers.DrawerSettings(execute=True, **FAST)
+    result = drawers.DrawerTask(link, camera, scene, handle_too, pickplace.RunLog(tmp_path), s).run(
+        "왼쪽 아래 서랍에 있는 물건을 꺼내 줘")
+    w.sync(tmp_path)
+    assert result["ok"] is True, result
+    assert [o for o in OBJECTS if w.in_handover(o)] and w.all_shut()
+    dropped = [e for e in events(tmp_path) if e["event"] == "estimate" and e.get("kept") is False]
+    assert [e["label"] for e in dropped] == ["purple cube"]
+
+
 def test_put_takes_the_object_off_the_table_into_the_named_drawer_and_shuts_it(link, camera, teleporting, tmp_path):
     result, world, _ = run(link, camera, teleporting, tmp_path, instruction="파란 큐브를 가운데 서랍에 넣어")
     assert result["ok"] is True and result["task"] == "put" and result["drawers_opened"] == ["r1c1"]
