@@ -302,6 +302,12 @@ def test_on_sim_scene_numbers_a_cone_is_gripped_on_its_skirt_and_carried_without
     assert not any(e["event"] == "carry" and e["how"] == "detour" for e in ev)
     grasp = [e for e in ev if e["event"] == "move" and e["phase"] == "descend"][-1]
     assert grasp["tcp_xyz"][2] == pytest.approx(0.103 + 0.019, abs=0.001)  # floor + the cone's grasp height
+    # s502 (788cb77): leaving the low handover look for the cabinet swept through the cone just set down.
+    i = max(k for k, e in enumerate(ev) if e["event"] == "vlm_reply" and e["purpose"] == "handover")
+    after = [e for e in ev[i:] if e["event"] == "move" and "pre-grasp" not in e["phase"]]
+    away = [e for e in after if e["phase"].endswith("cabinet look")]
+    assert after[0]["phase"] == "up from the handover" and away
+    assert min(e["tcp_xyz"][2] for e in away) >= 0.12 - 0.002
     assert world.in_handover("yellow_cone") and world.all_shut()
 
 

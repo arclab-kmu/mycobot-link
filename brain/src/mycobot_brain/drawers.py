@@ -44,6 +44,7 @@ class DrawerSettings(Settings):
     yaw_drift_deg: float = 30.0  # how far a free-heading pull may turn the gripper
     finger_half_m: float = 0.028  # TCP to the outside of a finger, jaw open (45.6 mm gap + the finger)
     pad_floor_clear_m: float = 0.001  # pad tips above a drawer floor or the table at the grasp
+    leave_mat_m: float = 0.12  # TCP over the table before leaving the handover mat for the cabinet
 
 
 def _add(a: Sequence[float], b: Sequence[float], s: float = 1.0) -> Vec:
@@ -341,7 +342,8 @@ class DrawerTask(PickPlace):
         # cabinet front and the arm stalled 6.8 deg short (it hit something our TCP/camera check misses).
         here, look = self._measured(), fx.cabinet_look_pose_deg
         if look and max(abs(a - b) for a, b in zip(here, look)) > 1.0:
-            self._goto(look, f"{verb} {d.id}: cabinet look", floor=None)
+            # Not low over the table, where an object may stand (the handover mat).
+            self._goto(look, f"{verb} {d.id}: cabinet look", floor=self.calib.table_z + self.s.leave_mat_m)
         try:
             q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.handle(d, start), a, -fx.standoff_m),
                                     approach=a, jaw=j)
@@ -506,6 +508,9 @@ class DrawerTask(PickPlace):
         if q is not None:
             self._goto(q, "look: handover", floor=self.calib.table_z + shape.height + 0.02)
         check = self._check(drawer_vlm.handover_question(desc), [], "handover")
+        # Straight up off the mat before anything else: in D3 s502 (788cb77) the joint move from this
+        # low look to the cabinet look swept the gripper through the cone just handed over.
+        self._rise(self.calib.table_z + self.s.leave_mat_m, "up from the handover")
         # Shut it either way: the gripper has let go, and a drawer left open fails the task too.
         self._close(d)
         if not check["ok"]:
