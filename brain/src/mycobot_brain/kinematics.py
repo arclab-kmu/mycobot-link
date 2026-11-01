@@ -241,14 +241,19 @@ def solve_ik(
     The two jaws are alike, so ``jaw`` and ``-jaw`` are the same grasp: the one
     nearer the seed is tried first, then the other (one can be past J6's limit).
     ``either_jaw=False`` keeps the sign: for the camera, x is the image's right.
+    ``jaw`` without ``approach`` fixes only the jaw axis: pads pinching two
+    faces may turn about the line through them (a knob gripped top and bottom
+    lets the gripper's heading drift as the drawer slides out).
     """
-    if approach is not None and jaw is not None and either_jaw:
+    if jaw is not None and either_jaw:
         first = jaw if dot(column(chain.pose(seed_deg, tool), 0), jaw) >= 0 else tuple(-j for j in jaw)
         kw = dict(tool=tool, approach=approach, hold=hold, limits=limits, margin=margin, tol_m=tol_m,
                   tol_deg=tol_deg, iters=iters, damping=damping)
         try:
             return _solve_ik(chain, seed_deg, target, jaw=first, **kw)
         except IKError:
+            if approach is None:
+                raise  # jaw only: the minimum-norm step from the seed already turns whichever way is shorter
             return _solve_ik(chain, seed_deg, target, jaw=tuple(-j for j in first), **kw)
     return _solve_ik(chain, seed_deg, target, tool=tool, approach=approach, jaw=jaw, hold=hold, limits=limits,
                      margin=margin, tol_m=tol_m, tol_deg=tol_deg, iters=iters, damping=damping)
@@ -273,7 +278,10 @@ def _solve_ik(
     q = [math.radians(a) for a in seed_deg]
     lo = [math.radians(a + margin) for a, _ in limits]
     hi = [math.radians(b - margin) for _, b in limits]
-    if approach is not None:
+    if approach is None and jaw is not None:
+        n = norm(jaw)
+        jaw = tuple(j / n for j in jaw)
+    elif approach is not None:
         n = norm(approach)
         approach = tuple(a / n for a in approach)
         if jaw is not None:
@@ -284,8 +292,6 @@ def _solve_ik(
             if n < 1e-6:
                 raise ValueError("jaw is parallel to approach")
             jaw = tuple(j / n for j in jaw)
-    else:
-        jaw = None
     err_p = err_a = float("inf")
     for _ in range(iters):
         t, jv, jw = chain.jacobian([math.degrees(x) for x in q], tool)
@@ -300,6 +306,15 @@ def _solve_ik(
             err_a = max(math.atan2(norm(ez), dot(z, approach)), math.atan2(norm(ex), dot(x, jaw)))
             e += [(a + b) / 2 for a, b in zip(ez, ex)]
             rows += [list(r) for r in jw]
+        elif jaw is not None:
+            x = column(t, 0)
+            # As for approach alone, with the jaw axis: spin about it is free.
+            ex = cross(x, jaw)
+            err_a = math.atan2(norm(ex), dot(x, jaw))
+            jw_perp = [[jw[i][k] - x[i] * sum(x[m] * jw[m][k] for m in range(3)) for k in range(len(q))]
+                       for i in range(3)]
+            e += list(ex)
+            rows += jw_perp
         elif approach is not None:
             z = column(t, 2)
             # The rotation that turns z onto approach, minus any spin about z.

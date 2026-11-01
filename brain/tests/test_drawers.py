@@ -180,3 +180,28 @@ def test_put_retries_a_table_grasp_that_missed(link, camera, teleporting, tmp_pa
     assert result["ok"] is True and world.objects["blue_cube"]["drawer"] == "r1c1"
     purposes = [e["purpose"] for e in events(tmp_path) if e["event"] == "vlm_request"]
     assert purposes.count("table") == 2 and purposes.count("held") == 2
+
+
+SIM_OBJECTS = {
+    "yellow_cone": {"colour": "yellow", "shape": "cone", "drawer": "r1c1", "xy": [0.284, 0.019], "z": 0.063 + 0.013},
+    "orange_cone": {"colour": "orange", "shape": "cone", "drawer": "r1c1", "xy": [0.284, -0.019], "z": 0.063 + 0.013},
+    "yellow_cube": {"colour": "yellow", "shape": "cube", "drawer": "r2c2", "xy": [0.284, -0.088], "z": 0.103 + 0.0125},
+    "blue_sphere": {"colour": "blue", "shape": "sphere", "drawer": "r0c0", "xy": [0.284, 0.088], "z": 0.023 + 0.013},
+}
+
+
+def test_on_sim_scene_numbers_the_knob_is_pinched_from_the_side_and_the_cone_found(link, camera, teleporting,
+                                                                                    tmp_path, monkeypatch):
+    """sim-scene's cabinet as of 16:40 (work in progress there): knob gripped with the tool
+    level and the jaw vertical, 93 mm pull, a neighbour 38 mm beside the cone."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    result, world, vlm = run(link, camera, teleporting, tmp_path, objects=SIM_OBJECTS, order=["r2c2", "r1c1"])
+    assert result["ok"] is True, result
+    assert result["drawers_opened"] == ["r2c2", "r1c1"]
+    assert world.in_handover("yellow_cone") and world.all_shut()
+    assert not any(world.moved(o) for o in SIM_OBJECTS if o != "yellow_cone")
+    scene = cs.load_sim_like()
+    pull = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "open r1c1"]
+    for e in pull:
+        jaw = kinematics.column(scene.chain.pose(e["angles_deg"], "tcp"), 0)
+        assert abs(jaw[2]) > 0.99  # jaw vertical the whole pull: the pads stay on the knob's top and bottom

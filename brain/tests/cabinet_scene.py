@@ -263,3 +263,57 @@ class CabinetVLM:
             ok = any(o["drawer"] == d and self.w.moved(oid) for oid, o in self.w.objects.items())
             return json.dumps({"seen": "drawer", "ok": ok})
         raise AssertionError(f"unexpected request {name}")
+
+
+# -- sim-scene's cabinet (arc-mycobot scripts/vlm_sim/drawer_geometry.py + drawer_plan.py, 2026-11-01 16:40,
+#    work in progress there): knob pinched from the side at a heading per column, a 93 mm pull that brings
+#    the whole tray out, full-height drawer fronts over 16 mm tray walls.
+SIM_FRONT_X = 0.24
+SIM_COL_Y = (0.088, 0.0, -0.088)
+SIM_BAY_Z = tuple(0.018 + r * 0.040 for r in range(3))  # bay bottoms
+SIM_YAW = {0: -20.0, 1: 40.0, 2: 20.0}  # handle heading per column
+SIM_OPEN_M = 0.093
+SIM_SHAPES = {
+    "cube": {"size_m": [0.025, 0.025, 0.025], "height_m": 0.025, "grasp_tcp_height_m": 0.0205},
+    "cylinder": {"radius_m": 0.013, "height_m": 0.025, "grasp_tcp_height_m": 0.0205},
+    "sphere": {"radius_m": 0.013, "height_m": 0.026, "grasp_tcp_height_m": 0.0205},
+    "cone": {"radius_m": 0.015, "height_m": 0.026, "grasp_tcp_height_m": 0.0205},
+}
+
+
+def sim_like_dict():
+    d = scene_dict()
+    drawers = []
+    for r, z0 in enumerate(SIM_BAY_Z):
+        for c, y in enumerate(SIM_COL_Y):
+            a = math.radians(SIM_YAW[c])
+            reach = 0.0165 * math.cos(a) + 0.0115 * abs(math.sin(a)) + 0.003
+            x = min(SIM_FRONT_X - 0.024 + 0.024 - reach, SIM_FRONT_X - 0.012)
+            drawers.append({
+                "id": f"r{r}c{c}", "row": r, "col": c,
+                "handle_closed_m": [x, y, z0 + 0.018],
+                "handle_grasp": {"approach": [math.cos(a), math.sin(a), 0.0], "jaw_axis": [0, 0, 1]},
+                "floor_z_m": z0 + 0.005,
+                "front_top_z_m": z0 + 0.0355,
+                "interior_closed_m": {"center": [SIM_FRONT_X + 0.008 + 0.036, y], "size": [0.072, 0.074, 0.016]},
+            })
+    d["cabinet"] = {
+        "box_m": {"min": [SIM_FRONT_X, -0.136, 0.0], "max": [SIM_FRONT_X + 0.09, 0.136, 0.14]},
+        "pull_axis": [-1.0, 0.0, 0.0],
+        "open_m": SIM_OPEN_M,
+        "handle_grasp": {"approach": [1, 0, 0], "jaw_axis": [0, 0, 1], "pregrasp_m": 0.04, "close_value": 0},
+        "pick_jaw_axis": [-1, 0, 0],
+        "drawers": drawers,
+    }
+    d["catalogue"] = {"colours": COLOURS, "shapes": SIM_SHAPES}
+    d["handover"] = {"center_m": [0.10, 0.19], "size_m": [0.09, 0.09]}
+    d["tcp"] = dict(d["tcp"], pad_extent_along_tool_z_m=[-0.0146, 0.0165])
+    c = calib.from_dict(d)
+    eye, target = (0.11, 0.0, 0.29), (SIM_FRONT_X, 0.0, 0.08)
+    q = kinematics.solve_ik(c.chain, c.look_pose_deg, eye, tool="camera", approach=[t - e for t, e in zip(target, eye)])
+    d["cabinet_look_pose_deg"] = [round(v, 3) for v in q]
+    return d
+
+
+def load_sim_like():
+    return calib.from_dict(sim_like_dict(), "cabinet_scene.py (sim-scene numbers)")

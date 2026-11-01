@@ -407,7 +407,7 @@ class PickPlace:
     def _check_path(self, path: Sequence[Sequence[float]], phase: str) -> None:
         """Raise if a joint-space path runs into the scene; the table scene has nothing but the floor."""
 
-    def _line(self, goal: Sequence[float], phase: str, approach: Vec = DOWN, jaw: Optional[Vec] = None,
+    def _line(self, goal: Sequence[float], phase: str, approach: Optional[Vec] = DOWN, jaw: Optional[Vec] = None,
               speed: Optional[int] = None) -> None:
         try:
             path = kinematics.line_path(self.calib.chain, self._measured(), goal, step_m=self.s.line_step_m,
