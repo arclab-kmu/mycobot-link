@@ -129,6 +129,21 @@ uv run mycobot-brain pick-place "빨간 블록을 잡아서 갈색 상자 안에
 
 `--calib` 파일에는 기구학 사슬(펌웨어 각도 기준), 카메라 K, 탁자 높이, 블록 크기, 상자 크기·테두리 높이, 관찰 자세, 그리퍼 열림·닫힘 값이 들어 있고, 물체 위치는 없습니다. 실행마다 `runs/pp-<시각>/events.jsonl`(모든 줄에 `wall` 유닉스 초)과 vLLM이 본 이미지를 남깁니다(`--record`나 `MYCOBOT_RUNS_DIR`로 위치 변경).
 
+## 서랍 (`drawer`)
+
+```bash
+uv run mycobot-brain drawer "노란색 원뿔 찾아서 꺼내 줘" --calib sim_calib_drawers.json --execute
+uv run mycobot-brain drawer "파란 큐브를 가운데 서랍에 넣어" --calib sim_calib_drawers.json --execute
+uv run mycobot-brain drawer "왼쪽 아래 서랍에 있는 물건을 꺼내 줘" --calib sim_calib_drawers.json --execute
+```
+
+3×3 서랍장(`r{행}c{열}`, 행 0이 아래, 열 0이 로봇의 왼쪽)입니다. 손잡이 위치, 당기는 방향과 거리, 서랍 바닥 높이와 안쪽 크기, 물체 목록(모양별 높이와 잡는 높이), 건네주는 곳은 calib 파일(`cabinet`, `catalogue`, `handover`)에 있습니다. 서랍에 무엇이 들어 있는지는 없습니다.
+
+- **vLLM이 정하는 것:** 명령 읽기(넣기/꺼내기/찾기, 물체, 서랍), 서랍장 사진에서 열린 서랍과 다음에 열 서랍, 열린 서랍 안의 물체(색, 모양, bbox)와 찾는 물체가 그중 어느 것인지, 잡혔나·건넸나·넣었나.
+- **코드가 하는 것:** 손잡이를 위에서 잡고 당기는 축을 따라 곧게 당기기·밀기, 픽셀 → 광선 → 서랍 바닥 + 그 모양의 절반 높이 평면 → IK.
+- **물체가 없을 때:** 찾기는 연 서랍을 닫고 다음 서랍으로 넘어갑니다. 끝나면 서랍장 사진으로 이번 실행에서 연 서랍이 모두 닫혔는지 확인합니다.
+- **기록:** 모든 단계를 `events.jsonl`과 vLLM이 본 이미지로 남깁니다(`runs/dr-<시각>/`).
+
 ## 검증 상태 (2026-10-28)
 
 - 확인함: 팔 서버의 직렬 프레임 11종이 pymycobot 4.0.7이 실제로 쓰는 바이트와 같고, `get_angles` 응답도 pymycobot과 같은 값으로 읽힘(`arm-server/tests/golden.rs`, pty 녹화). Rust 테스트 28개, Python 테스트 32개(실제 Rust 서버와의 dry-run 연동 포함). aarch64 정적 바이너리가 Spark에서 실행되고 두뇌 CLI와 dry-run으로 연결됨.

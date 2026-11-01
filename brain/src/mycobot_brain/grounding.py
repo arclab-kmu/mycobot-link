@@ -67,7 +67,8 @@ def locate_schema(roles: Sequence[str], shape: str, with_next: bool) -> Dict[str
     return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
 
 
-def locate_prompt(roles: Sequence[str], coords: str, shape: str, width: int, height: int, with_next: bool) -> str:
+def locate_prompt(roles: Sequence[str], coords: str, shape: str, width: int, height: int, with_next: bool,
+                  describe: Optional[Dict[str, str]] = None) -> str:
     where = ("bbox_2d [x1, y1, x2, y2], the tight box around it" if shape == "bbox"
              else "point_2d [x, y], the centre of it as seen in the image")
     lines = [
@@ -76,7 +77,7 @@ def locate_prompt(roles: Sequence[str], coords: str, shape: str, width: int, hei
         "For each object asked for, give label (a few words naming it), visible (false if it is not in the image, "
         f"or only partly), and {where}, {_coords_text(coords, width, height)}.",
         "If an object is not visible, set visible false and give zeros; never guess where something unseen is.",
-        "Objects asked for: " + "; ".join(f"{r} = {ROLES[r]}" for r in roles) + ".",
+        "Objects asked for: " + "; ".join(f"{r} = {(describe or ROLES).get(r, ROLES.get(r, r))}" for r in roles) + ".",
         "seen is one short sentence on what is on the table.",
     ]
     if with_next:
@@ -96,12 +97,14 @@ def build_locate_request(
     height: int = 480,
     with_next: bool = True,
     model: str = DEFAULT_MODEL,
+    describe: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    """``describe`` replaces the generic role texts (``ROLES``), e.g. ``{"pick": "the yellow cone"}``."""
     text = f"Instruction: {instruction}"
     return {
         "model": model,
         "messages": [
-            {"role": "system", "content": locate_prompt(roles, coords, shape, width, height, with_next)},
+            {"role": "system", "content": locate_prompt(roles, coords, shape, width, height, with_next, describe)},
             {"role": "user", "content": [image_part(jpeg), {"type": "text", "text": text}]},
         ],
         "response_format": {"type": "json_schema",
@@ -183,8 +186,10 @@ def build_check_request(
     images: Sequence[Tuple[str, bytes]],
     *,
     model: str = DEFAULT_MODEL,
+    name: str = "check",
 ) -> Dict[str, Any]:
-    """A yes/no question about one or more captioned images: ``{"seen", "ok"}``."""
+    """A yes/no question about one or more captioned images: ``{"seen", "ok"}``.
+    ``name`` is the schema name, which says in the request which check it is."""
     content: List[Dict[str, Any]] = []
     for caption, jpeg in images:
         content += [{"type": "text", "text": caption}, image_part(jpeg)]
@@ -198,7 +203,7 @@ def build_check_request(
                 "latest image shows that bears on the question. ok: true only if the images clearly show yes.")},
             {"role": "user", "content": content},
         ],
-        "response_format": {"type": "json_schema", "json_schema": {"name": "check", "schema": CHECK_SCHEMA}},
+        "response_format": {"type": "json_schema", "json_schema": {"name": name, "schema": CHECK_SCHEMA}},
         "chat_template_kwargs": {"enable_thinking": False},
         "temperature": 0,
         "max_tokens": 200,

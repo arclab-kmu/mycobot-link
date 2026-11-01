@@ -143,6 +143,8 @@ class PickPlace:
 
     def _run(self, instruction: str) -> Dict[str, Any]:
         s, c = self.s, self.calib
+        if c.block_edge is None or c.box_rim_z is None:
+            raise PickPlaceError(f"{c.source or 'the calib'} has no block and box for pick-place")
         state = self.link.wait_state()
         if state["angles_deg"] is None:
             raise LinkError("the arm server has no joint reading to start from")
@@ -285,13 +287,13 @@ class PickPlace:
         self.log.event("vlm_reply", n=self._vlm_n, purpose=purpose, raw=raw, parsed=parsed, latency_s=self._latency)
         return parsed
 
-    def _locate(self, instruction: str, roles: Sequence[str], purpose: str,
-                with_next: bool) -> Tuple[Dict[str, Any], Frame, List[float]]:
+    def _locate(self, instruction: str, roles: Sequence[str], purpose: str, with_next: bool,
+                describe: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], Frame, List[float]]:
         k = self.calib.camera
         frame, angles = self._look()
         opts = dict(roles=roles, coords=self.s.coords, shape=self.s.shape, width=k.width, height=k.height,
                     with_next=with_next)
-        request = grounding.build_locate_request(frame.jpeg, instruction, **opts,
+        request = grounding.build_locate_request(frame.jpeg, instruction, **opts, describe=describe,
                                                  **({"model": self.model} if self.model else {}))
         raw = self._ask(purpose, request, [frame.jpeg], angles)
         found = self._reply(purpose, raw, lambda r: grounding.parse_locate(r, **opts))
@@ -310,7 +312,8 @@ class PickPlace:
     def _check(self, question: str, before: Sequence[Tuple[str, bytes]], purpose: str) -> Dict[str, Any]:
         frame, angles = self._look()
         images = list(before) + [("Now:", frame.jpeg)]
-        request = grounding.build_check_request(question, images, **({"model": self.model} if self.model else {}))
+        request = grounding.build_check_request(question, images, name=f"check_{purpose}",
+                                                **({"model": self.model} if self.model else {}))
         raw = self._ask(purpose, request, [j for _, j in images], angles)
         return self._reply(purpose, raw, grounding.parse_check)
 
@@ -336,9 +339,10 @@ class PickPlace:
             raise LinkError("lost the joint reading")
         return list(state["angles_deg"])
 
-    def _ik(self, seed: Sequence[float], tcp: Sequence[float], approach: Vec = DOWN) -> List[float]:
+    def _ik(self, seed: Sequence[float], tcp: Sequence[float], approach: Vec = DOWN,
+            jaw: Optional[Vec] = None) -> List[float]:
         try:
-            return kinematics.solve_ik(self.calib.chain, seed, tcp, tool="tcp", approach=approach)
+            return kinematics.solve_ik(self.calib.chain, seed, tcp, tool="tcp", approach=approach, jaw=jaw)
         except IKError as exc:
             raise PickPlaceError(str(exc)) from exc
 
@@ -397,15 +401,20 @@ class PickPlace:
             low = min(kinematics.position(self.calib.chain.pose(q, "tcp"))[2] for q in path)
             if low < floor - 1e-3:
                 raise PickPlaceError(f"{phase}: the joint path takes the TCP down to z={low:.3f} (floor {floor:.3f})")
+        self._check_path(path, phase)
         self._send(path, phase, speed or self.s.speed)
 
-    def _line(self, goal: Sequence[float], phase: str, approach: Vec = DOWN) -> None:
+    def _check_path(self, path: Sequence[Sequence[float]], phase: str) -> None:
+        """Raise if a joint-space path runs into the scene; the table scene has nothing but the floor."""
+
+    def _line(self, goal: Sequence[float], phase: str, approach: Vec = DOWN, jaw: Optional[Vec] = None,
+              speed: Optional[int] = None) -> None:
         try:
             path = kinematics.line_path(self.calib.chain, self._measured(), goal, step_m=self.s.line_step_m,
-                                        max_step=self.s.max_step, approach=approach)
+                                        max_step=self.s.max_step, approach=approach, jaw=jaw)
         except IKError as exc:
             raise PickPlaceError(f"{phase}: {exc}") from exc
-        self._send(path, phase, self.s.slow_speed)
+        self._send(path, phase, speed or self.s.slow_speed)
 
     def _send(self, path: Sequence[Sequence[float]], phase: str, speed: int) -> None:
         for i, q in enumerate(path, 1):

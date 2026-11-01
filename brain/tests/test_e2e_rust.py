@@ -287,3 +287,42 @@ def test_cli_pick_place_runs_a_whole_pick_on_the_rust_server(tmp_path, capsys):
     assert math.dist(grasp["tcp_xyz"], scene.BLOCK) < 0.002
     assert math.dist(release["tcp_xyz"][:2], scene.BOX[:2]) < 0.002
     assert "watchdog: no line from the brain" not in err
+
+
+def test_cli_drawer_find_runs_on_the_rust_server(tmp_path, capsys):
+    """mycobot-brain drawer --execute "노란색 원뿔 찾아서 꺼내 줘": every waypoint through the
+    Rust dry-run server (watchdog 300 ms, vLLM answers 0.5 s late), and the
+    world the run's own events drive ends with the cone handed over and the
+    drawers shut."""
+    import cabinet_scene as cs
+    from test_drawers import COMMANDS, OBJECTS
+
+    arm_port, cam_port = _free_port(), _free_port()
+    run_dir = tmp_path / "run"
+    scene = cs.load()
+    world = cs.World(scene, OBJECTS)
+    vllm = AnsweringVLLM(cs.CabinetVLM(world, run_dir, commands=COMMANDS, order=["r0c0", "r1c2"]), delay=0.5)
+    server = subprocess.Popen([str(BIN), "--brain", f"127.0.0.1:{arm_port}", "--watchdog-ms", "300",
+                               "--state-hz", "50"], stderr=subprocess.PIPE, text=True)
+    stop = threading.Event()
+    threading.Thread(target=_camera_when_bound, args=(cam_port, stop), daemon=True).start()
+    try:
+        code = cli.main(["--host", "127.0.0.1", "--port", str(arm_port), "--camera-port", str(cam_port),
+                         "--wait", "15", "drawer", "노란색 원뿔 찾아서 꺼내 줘",
+                         "--calib", str(cs.write(tmp_path / "calib.json")), "--execute", "--record", str(run_dir),
+                         "--settle", "0.1", "--gripper-wait", "0.1",
+                         "--vllm-url", f"http://127.0.0.1:{vllm.server_port}/v1"])
+    finally:
+        stop.set()
+        server.terminate()
+        _, err = server.communicate(timeout=5)
+        vllm.shutdown()
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0, (lines[-3:], err[-2000:])
+    world.sync(run_dir)
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+    assert events[-1]["event"] == "result" and events[-1]["ok"] is True
+    assert events[-1]["drawers_opened"] == ["r0c0", "r1c2"]
+    assert world.in_handover("yellow_cone") and world.all_shut()
+    assert not any(world.moved(o) for o in OBJECTS if o != "yellow_cone")
+    assert "watchdog: no line from the brain" not in err

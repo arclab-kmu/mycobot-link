@@ -1,0 +1,235 @@
+"""The drawer cabinet as the code knows it, like the table height.
+
+From the calib file: where each handle is when its drawer is shut, which way
+and how far a drawer pulls out, each drawer's floor and inner box, where to
+look from, the object catalogue (shape names, sizes, grasp heights) and the
+handover zone. Never what is in a drawer or whether it is open: that is for
+the VLM to say from the camera.
+
+Drawer ids are ``r{row}c{col}``: row 0 is the bottom, column 0 the robot's
+left (+y).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from mycobot_brain.kinematics import Vec, dot, norm
+
+ROW_KO = ("아래", "가운데", "위")
+COL_KO = ("왼쪽", "가운데", "오른쪽")
+ROW_EN = ("bottom", "middle", "top")
+COL_EN = ("left", "middle", "right")
+
+
+class FixtureError(ValueError):
+    """The calib's cabinet section is missing something or does not add up."""
+
+
+def _vec(v: Any, n: int = 3) -> Tuple[float, ...]:
+    if not (isinstance(v, (list, tuple)) and len(v) == n):
+        raise FixtureError(f"need {n} numbers, got {v!r}")
+    return tuple(float(x) for x in v)
+
+
+def _unit(v: Sequence[float]) -> Vec:
+    n = norm(v)
+    if n < 1e-9:
+        raise FixtureError(f"zero vector {v!r}")
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def _pose(v: Any) -> Optional[List[float]]:
+    return None if v is None else [float(a) for a in _vec(v, 6)]
+
+
+@dataclass(frozen=True)
+class Drawer:
+    id: str
+    row: int
+    col: int
+    handle_closed: Vec  # TCP target on the handle with the drawer shut
+    floor_z: float  # top of the drawer floor
+    interior_center: Tuple[float, float]  # x, y of the inner box with the drawer shut
+    interior_size: Vec  # inner box along x, y, z
+    look_pose_deg: Optional[List[float]] = None  # tilted view of the opened interior
+    topdown_pose_deg: Optional[List[float]] = None
+
+    @property
+    def name_ko(self) -> str:
+        if (self.row, self.col) == (1, 1):
+            return "가운데"
+        return f"{COL_KO[self.col]} {ROW_KO[self.row]}" if self.col != 1 else f"가운데 {ROW_KO[self.row]}"
+
+    @property
+    def name_en(self) -> str:
+        return f"{ROW_EN[self.row]} row, {COL_EN[self.col]} column"
+
+
+@dataclass(frozen=True)
+class Shape:
+    name: str
+    height: float
+    width: float  # widest across, for spacing objects in a drawer
+    grasp_height: float  # TCP above the surface it stands on, for the grasp
+
+
+@dataclass
+class Fixture:
+    drawers: Dict[str, Drawer]
+    pull_axis: Vec  # unit, the way a drawer moves when it opens
+    open_m: float
+    box_min: Vec
+    box_max: Vec
+    cabinet_look_pose_deg: List[float]
+    grasp_approach: Vec  # tool z at the handle
+    grasp_jaw: Optional[Vec]  # tool x at the handle; None leaves it free
+    pregrasp_m: float
+    handle_close_value: Optional[int]
+    colours: List[str]
+    shapes: Dict[str, Shape]
+    handover_center: Tuple[float, float]
+    handover_size: Tuple[float, float]
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    # -- where things are -------------------------------------------------------
+
+    def drawer(self, drawer_id: str) -> Drawer:
+        try:
+            return self.drawers[drawer_id]
+        except KeyError:
+            raise FixtureError(f"no drawer {drawer_id!r}; have {sorted(self.drawers)}") from None
+
+    def handle(self, d: Drawer, opening: float) -> Vec:
+        """The handle's grasp point with the drawer pulled out ``opening`` m."""
+        return tuple(h + opening * a for h, a in zip(d.handle_closed, self.pull_axis))  # type: ignore[return-value]
+
+    def interior_center(self, d: Drawer, opening: float) -> Vec:
+        """Centre of the drawer floor, pulled out ``opening`` m."""
+        x, y = d.interior_center
+        return (x + opening * self.pull_axis[0], y + opening * self.pull_axis[1], d.floor_z)
+
+    @property
+    def front(self) -> float:
+        """The cabinet face a drawer comes out of, as a value of ``dot(p, pull_axis)``."""
+        corners = [(x, y, z) for x in (self.box_min[0], self.box_max[0]) for y in (self.box_min[1], self.box_max[1])
+                   for z in (self.box_min[2], self.box_max[2])]
+        return max(dot(c, self.pull_axis) for c in corners)
+
+    def axes(self) -> Tuple[Vec, Vec]:
+        """Unit vectors in the floor plane: along the pull, and across it."""
+        a = _unit((self.pull_axis[0], self.pull_axis[1], 0.0))
+        return a, (-a[1], a[0], 0.0)
+
+    def extent(self, d: Drawer) -> Tuple[float, float]:
+        """The inner box's length along and across the pull (the box is axis-aligned)."""
+        a, _ = self.axes()
+        x, y = d.interior_size[0], d.interior_size[1]
+        return (x, y) if abs(a[0]) >= abs(a[1]) else (y, x)
+
+    def exposed(self, d: Drawer, opening: float, margin: float = 0.0) -> Tuple[Vec, float, float]:
+        """The part of the opened floor out in the open (not under the cabinet), shrunk by
+        ``margin``: its centre and half-lengths along and across the pull. Empty halves are 0."""
+        a, _ = self.axes()
+        c = self.interior_center(d, opening)
+        along, across = self.extent(d)
+        half_along, half_across = along / 2, across / 2
+        # Along the pull, the floor runs from s_back to s_out (s = dot(p, a)).
+        s_c = dot(c, a)
+        s_out = s_c + half_along - margin
+        s_back = max(s_c - half_along, self.front) + margin
+        hw = half_across - margin
+        if s_out <= s_back or hw <= 0:
+            return c, 0.0, 0.0
+        mid = (s_out + s_back) / 2 - s_c
+        return (c[0] + mid * a[0], c[1] + mid * a[1], c[2]), (s_out - s_back) / 2, hw
+
+    def inside(self, d: Drawer, p: Sequence[float], opening: float, margin: float = 0.0) -> bool:
+        """``p`` (x, y) over the opened drawer's floor, ``margin`` in from its walls."""
+        a, b = self.axes()
+        c = self.interior_center(d, opening)
+        rel = (p[0] - c[0], p[1] - c[1], 0.0)
+        along, across = self.extent(d)
+        return abs(dot(rel, a)) <= along / 2 - margin and abs(dot(rel, b)) <= across / 2 - margin
+
+    def free_spot(self, d: Drawer, opening: float, occupied: Sequence[Sequence[float]], width: float,
+                  margin: float = 0.006, grid: int = 7) -> Optional[Vec]:
+        """A floor point in the open part of the drawer for an object ``width`` wide,
+        as far as it can be from ``occupied`` (x, y) and the walls. None if it cannot fit."""
+        c, ha, hb = self.exposed(d, opening, margin + width / 2)
+        if ha <= 0 or hb <= 0:
+            return None
+        a, b = self.axes()
+        best, best_score = None, -math.inf
+        for i in range(grid):
+            for j in range(grid):
+                sa = -ha + 2 * ha * i / (grid - 1)
+                sb = -hb + 2 * hb * j / (grid - 1)
+                p = (c[0] + sa * a[0] + sb * b[0], c[1] + sa * a[1] + sb * b[1], c[2])
+                gap = min((math.hypot(p[0] - o[0], p[1] - o[1]) for o in occupied), default=math.inf)
+                # Prefer room from the other objects; break ties towards the middle.
+                score = min(gap, 1.0) - 1e-3 * math.hypot(sa, sb)
+                if score > best_score:
+                    best, best_score = p, score
+        return best
+
+    def in_handover(self, p: Sequence[float], margin: float = 0.0) -> bool:
+        return (abs(p[0] - self.handover_center[0]) <= self.handover_size[0] / 2 - margin
+                and abs(p[1] - self.handover_center[1]) <= self.handover_size[1] / 2 - margin)
+
+    # -- words ----------------------------------------------------------------
+
+    def drawer_table(self) -> str:
+        """One line per drawer for a prompt: id, Korean name, English position."""
+        return "\n".join(f"{d.id}: {d.name_ko} 서랍 ({d.name_en})" for d in sorted(
+            self.drawers.values(), key=lambda d: (-d.row, d.col)))
+
+
+def from_dict(d: Dict[str, Any]) -> Fixture:
+    """The ``cabinet`` / ``catalogue`` / ``handover`` sections of a calib file."""
+    try:
+        cab = d["cabinet"]
+        grasp = cab.get("handle_grasp", {})
+        box = cab["box_m"]
+        drawers = {}
+        for row in cab["drawers"]:
+            inner = row["interior_closed_m"]
+            dr = Drawer(
+                id=str(row["id"]), row=int(row["row"]), col=int(row["col"]),
+                handle_closed=_vec(row["handle_closed_m"]),  # type: ignore[arg-type]
+                floor_z=float(row["floor_z_m"]),
+                interior_center=_vec(inner["center"][:2], 2),  # type: ignore[arg-type]
+                interior_size=_vec(inner["size"]),  # type: ignore[arg-type]
+                look_pose_deg=_pose(row.get("look_pose_deg")),
+                topdown_pose_deg=_pose(row.get("topdown_pose_deg")),
+            )
+            if dr.id != f"r{dr.row}c{dr.col}":
+                raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")
+            drawers[dr.id] = dr
+        cat = d["catalogue"]
+        shapes = {}
+        for name, s in cat["shapes"].items():
+            shapes[name] = Shape(name, float(s["height_m"]), float(s.get("width_m", s.get("diameter_m", 0.03))),
+                                 float(s["grasp_height_m"]))
+        hand = d["handover"]
+        jaw = grasp.get("jaw_axis")
+        return Fixture(
+            drawers=drawers,
+            pull_axis=_unit(_vec(cab["pull_axis"])),
+            open_m=float(cab["open_m"]),
+            box_min=_vec(box["min"]),  # type: ignore[arg-type]
+            box_max=_vec(box["max"]),  # type: ignore[arg-type]
+            cabinet_look_pose_deg=_pose(d.get("cabinet_look_pose_deg", cab.get("look_pose_deg"))) or [],
+            grasp_approach=_unit(_vec(grasp.get("approach", (0.0, 0.0, -1.0)))),
+            grasp_jaw=None if jaw is None else _unit(_vec(jaw)),
+            pregrasp_m=float(grasp.get("pregrasp_m", 0.04)),
+            handle_close_value=None if grasp.get("close_value") is None else int(grasp["close_value"]),
+            colours=[str(c) for c in cat["colours"]],
+            shapes=shapes,
+            handover_center=_vec(hand["center_m"][:2], 2),  # type: ignore[arg-type]
+            handover_size=_vec(hand["size_m"][:2], 2),  # type: ignore[arg-type]
+        )
+    except (KeyError, TypeError, IndexError) as exc:
+        raise FixtureError(f"cabinet calib: {exc!r}") from exc

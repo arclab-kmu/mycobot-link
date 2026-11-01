@@ -217,6 +217,8 @@ def solve_ik(
     *,
     tool: str = "tcp",
     approach: Optional[Sequence[float]] = (0.0, 0.0, -1.0),
+    jaw: Optional[Sequence[float]] = None,
+    either_jaw: bool = True,
     hold: Sequence[int] = (),
     limits: Sequence[Tuple[float, float]] = JOINT_LIMITS_DEG,
     margin: float = IK_MARGIN_DEG,
@@ -233,13 +235,57 @@ def solve_ik(
     the elbow branch the arm is already in, and J6 roughly where it was.
     ``hold`` lists joints (1-based) kept at the seed: a camera off the flange
     axis would otherwise use J6 to slide itself sideways.
+
+    ``jaw`` (with ``approach``) also fixes the tool x axis, the line the jaws
+    close along: a drawer handle has to sit across the jaws, not along them.
+    The two jaws are alike, so ``jaw`` and ``-jaw`` are the same grasp: the one
+    nearer the seed is tried first, then the other (one can be past J6's limit).
+    ``either_jaw=False`` keeps the sign: for the camera, x is the image's right.
     """
+    if approach is not None and jaw is not None and either_jaw:
+        first = jaw if dot(column(chain.pose(seed_deg, tool), 0), jaw) >= 0 else tuple(-j for j in jaw)
+        kw = dict(tool=tool, approach=approach, hold=hold, limits=limits, margin=margin, tol_m=tol_m,
+                  tol_deg=tol_deg, iters=iters, damping=damping)
+        try:
+            return _solve_ik(chain, seed_deg, target, jaw=first, **kw)
+        except IKError:
+            return _solve_ik(chain, seed_deg, target, jaw=tuple(-j for j in first), **kw)
+    return _solve_ik(chain, seed_deg, target, tool=tool, approach=approach, jaw=jaw, hold=hold, limits=limits,
+                     margin=margin, tol_m=tol_m, tol_deg=tol_deg, iters=iters, damping=damping)
+
+
+def _solve_ik(
+    chain: Chain,
+    seed_deg: Sequence[float],
+    target: Sequence[float],
+    *,
+    tool: str,
+    approach: Optional[Sequence[float]],
+    jaw: Optional[Sequence[float]],
+    hold: Sequence[int],
+    limits: Sequence[Tuple[float, float]],
+    margin: float,
+    tol_m: float,
+    tol_deg: float,
+    iters: int,
+    damping: float,
+) -> List[float]:
     q = [math.radians(a) for a in seed_deg]
     lo = [math.radians(a + margin) for a, _ in limits]
     hi = [math.radians(b - margin) for _, b in limits]
     if approach is not None:
         n = norm(approach)
         approach = tuple(a / n for a in approach)
+        if jaw is not None:
+            # Only the part of jaw across the approach can be met.
+            along = dot(jaw, approach)
+            jaw = tuple(j - along * a for j, a in zip(jaw, approach))
+            n = norm(jaw)
+            if n < 1e-6:
+                raise ValueError("jaw is parallel to approach")
+            jaw = tuple(j / n for j in jaw)
+    else:
+        jaw = None
     err_p = err_a = float("inf")
     for _ in range(iters):
         t, jv, jw = chain.jacobian([math.degrees(x) for x in q], tool)
@@ -248,7 +294,13 @@ def solve_ik(
         rows = [jv[0], jv[1], jv[2]]
         err_p = norm(e)
         err_a = 0.0
-        if approach is not None:
+        if approach is not None and jaw is not None:
+            z, x = column(t, 2), column(t, 0)
+            ez, ex = cross(z, approach), cross(x, jaw)
+            err_a = max(math.atan2(norm(ez), dot(z, approach)), math.atan2(norm(ex), dot(x, jaw)))
+            e += [(a + b) / 2 for a, b in zip(ez, ex)]
+            rows += [list(r) for r in jw]
+        elif approach is not None:
             z = column(t, 2)
             # The rotation that turns z onto approach, minus any spin about z.
             ea = cross(z, approach)
@@ -336,16 +388,47 @@ def line_path(
     step_m: float = 0.01,
     max_step: float = 8.0,
     approach: Optional[Sequence[float]] = (0.0, 0.0, -1.0),
+    jaw: Optional[Sequence[float]] = None,
 ) -> List[List[float]]:
     """Joint waypoints that take ``tool`` along a straight line to ``goal``
-    (descend, lift), each IK seeded from the one before."""
+    (descend, lift, pull a drawer), each IK seeded from the one before."""
     p0 = position(chain.pose(start_deg, tool))
     n = max(1, math.ceil(norm([g - p for g, p in zip(goal, p0)]) / step_m))
     q = list(start_deg)
     out: List[List[float]] = []
     for i in range(1, n + 1):
         target = [p + (g - p) * i / n for p, g in zip(p0, goal)]
-        nxt = solve_ik(chain, q, target, tool=tool, approach=approach)
+        nxt = solve_ik(chain, q, target, tool=tool, approach=approach, jaw=jaw)
         out += joint_path(q, nxt, max_step)
         q = nxt
     return out
+
+
+def look_at(
+    chain: Chain,
+    seed_deg: Sequence[float],
+    target: Sequence[float],
+    *,
+    distance: float,
+    tilt_deg: float,
+    toward: Optional[Sequence[float]] = None,
+    right: Optional[Sequence[float]] = None,
+) -> List[float]:
+    """Joint angles that put the camera ``distance`` from ``target``, looking at
+    it, ``tilt_deg`` from straight down.
+
+    The camera leans out from the target along ``toward`` (horizontal; default
+    towards the base), so a tilted view of an opened drawer looks into it from
+    the robot's side and sees a cone's flank, not only its circle.
+    ``right`` fixes which way the image's right edge points (else the roll is
+    whatever is nearest the seed).
+    """
+    if toward is None:
+        toward = (-target[0], -target[1], 0.0)
+    n = math.hypot(toward[0], toward[1])
+    h = (toward[0] / n, toward[1] / n, 0.0) if n > 1e-9 else (0.0, 0.0, 0.0)
+    t = math.radians(tilt_deg)
+    offset = (math.sin(t) * h[0], math.sin(t) * h[1], math.cos(t))
+    eye = tuple(p + distance * o for p, o in zip(target, offset))
+    return solve_ik(chain, seed_deg, eye, tool="camera", approach=tuple(-o for o in offset), jaw=right,
+                    either_jaw=False)

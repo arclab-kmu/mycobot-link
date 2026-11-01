@@ -1,8 +1,10 @@
-"""The scene's fixed geometry: kinematic chain, camera, table, block, box, look pose.
+"""The scene's fixed geometry: kinematic chain, camera, table, block, box, look pose,
+and for the drawer scene the cabinet (:mod:`mycobot_brain.fixture`).
 
 Read from one JSON file (``sim_calib.json`` from the Isaac Lab scene, or one
 measured on the real arm). It holds no object poses: where the block and the
-box are is for the VLM to say, from the camera image, every run.
+box are, and what is in which drawer, is for the VLM to say, from the camera
+image, every run.
 """
 
 from __future__ import annotations
@@ -11,8 +13,9 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
+from mycobot_brain import fixture as fixture_mod
 from mycobot_brain.kinematics import Chain, Intrinsics, Joint, Mat, quat_matrix, rpy_matrix, transform
 
 
@@ -25,19 +28,22 @@ class Calib:
     chain: Chain
     camera: Intrinsics
     table_z: float
-    block_edge: float
-    box_size: Sequence[float]  # outer x, y, z (m)
-    box_rim_z: float
+    block_edge: Optional[float]  # None in a scene without the block (the drawers)
+    box_size: Sequence[float]  # outer x, y, z (m); empty without the box
+    box_rim_z: Optional[float]
     look_pose_deg: List[float]
     gripper_open: int
     gripper_closed: int
     #: how far the finger pads reach past the TCP along the approach axis.
     pad_below_tcp: float = 0.0
     source: str = ""
+    fixture: Optional[fixture_mod.Fixture] = None
 
     @property
     def block_plane_z(self) -> float:
         """Height of the block's centre on the table: the plane a block pixel is put on."""
+        if self.block_edge is None:
+            raise CalibError(f"{self.source or 'calib'} has no block")
         return self.table_z + self.block_edge / 2
 
 
@@ -101,24 +107,45 @@ def intrinsics_from(spec: Dict[str, Any]) -> Intrinsics:
 
 def from_dict(d: Dict[str, Any], source: str = "") -> Calib:
     try:
-        box = d.get("box", {})
+        box = d.get("box") or {}
         gripper = d.get("gripper", {})
         table_z = float(_need(d, "table_z_m", "table_z"))
-        block_edge = d["block"]["edge_m"] if "block" in d else _need(d, "block_edge_m", "block_edge")
+        has_cabinet = "cabinet" in d
+        if "block" in d:
+            block_edge: Optional[float] = float(d["block"]["edge_m"])
+        elif has_cabinet and not any(k in d for k in ("block_edge_m", "block_edge")):
+            block_edge = None
+        else:
+            block_edge = float(_need(d, "block_edge_m", "block_edge"))
+        if box:
+            box_size = [float(x) for x in _need(box, "size_m", "outer_m", "size")]
+            rim: Optional[float] = (float(box["rim_z_m"]) if "rim_z_m" in box
+                                    else table_z + float(_need(box, "rim_height_m", "height_m")))
+        elif has_cabinet:
+            box_size, rim = [], None
+        else:
+            raise CalibError("missing box")
+        fix = fixture_mod.from_dict(d) if has_cabinet else None
+        look = d.get("look_pose_deg") or (fix.cabinet_look_pose_deg if fix else None)
+        if look is None:
+            raise CalibError("missing look_pose_deg")
         pads = (d.get("tcp") or {}).get("pad_extent_along_tool_z_m")
         calib = Calib(
             chain=chain_from(d["chain"] if "chain" in d else d),
             camera=intrinsics_from(_need(d, "camera", "intrinsics")),
             table_z=table_z,
-            block_edge=float(block_edge),
-            box_size=[float(x) for x in _need(box, "size_m", "outer_m", "size")],
-            box_rim_z=float(box["rim_z_m"]) if "rim_z_m" in box else table_z + float(_need(box, "rim_height_m", "height_m")),
-            look_pose_deg=[float(a) for a in _need(d, "look_pose_deg")],
+            block_edge=block_edge,
+            box_size=box_size,
+            box_rim_z=rim,
+            look_pose_deg=[float(a) for a in look],
             gripper_open=int(_need(gripper, "open", "open_value")),
             gripper_closed=int(_need(gripper, "closed", "closed_value")),
             pad_below_tcp=float(max(pads)) if pads else 0.0,
             source=source,
+            fixture=fix,
         )
+    except fixture_mod.FixtureError as exc:
+        raise CalibError(f"{source or 'calib'}: {exc}") from exc
     except (KeyError, TypeError, IndexError) as exc:
         raise CalibError(f"{source or 'calib'}: {exc!r}") from exc
     if len(calib.look_pose_deg) != 6:
