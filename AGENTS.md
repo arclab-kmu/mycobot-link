@@ -83,6 +83,9 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
 - `camera-push/camera_push.py`: Jetson, Python 3.8 stdlib + `ffmpeg`. Grabs
   `/dev/video0` (MJPG), re-encodes every 1/rate-th frame, pushes the newest.
 - `tools/golden_frames.py`: pymycobot over a pty.
+- `tools/g1_grounding.py`: VLM pixels vs sim truth. `tools/g3_sim_run.sh` (one
+  seed: reset → record → `pick-place --execute` → truth) and `tools/g3_score.py`
+  (pass/fail from the run's raw files). Truth is read only by these.
 
 ## Relation to other repos
 
