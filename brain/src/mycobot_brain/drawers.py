@@ -407,7 +407,7 @@ class DrawerTask(PickPlace):
                            source=self.s.view, pixel=o["pixel"], xyz=None if xyz is None else _r(xyz, 4),
                            kept=on_floor)
             if on_floor:
-                if look["target"] == i:
+                if look.get("target") == i:
                     target_at = len(kept)
                 kept.append(o)
         return {**look, "objects": kept, "target": target_at, "angles": q, "jpeg": frame.jpeg}
