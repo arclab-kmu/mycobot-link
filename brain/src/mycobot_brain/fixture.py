@@ -76,6 +76,47 @@ class HandleStage:
 
 
 @dataclass(frozen=True)
+class TaughtLeg:
+    """Joint waypoints sim-scene verified (calib v3.2): the first is where the leg starts, then <= 2 deg
+    apart. Played as given, no IK (leader 2026-11-02 12:24); ``tcp`` is sim-scene's FK, for comparison."""
+
+    q: Tuple[Tuple[float, ...], ...]
+    tcp: Optional[Tuple[Vec, ...]] = None
+    speed: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class TaughtStage:
+    """One grip of a taught open or close: gripper values and the legs in, to_handle, pull, back_off."""
+
+    from_m: float
+    to_m: float
+    legs: Dict[str, TaughtLeg]
+    preshape: Optional[int] = None
+    close: Optional[int] = None
+    release: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class Taught:
+    open: Tuple[TaughtStage, ...]
+    close: Tuple[TaughtStage, ...]
+    open_out: Optional[TaughtLeg] = None  # last back-off -> the cabinet look
+    close_out: Optional[TaughtLeg] = None
+    #: "cabinet_look>tilted", "tilted>cabinet_look", "tilted>topdown", "topdown>tilted", ...
+    routes: Dict[str, TaughtLeg] = field(default_factory=dict)
+
+    def legs(self) -> List[Tuple[str, TaughtLeg]]:
+        out: List[Tuple[str, TaughtLeg]] = []
+        for verb, stages, last in (("open", self.open, self.open_out), ("close", self.close, self.close_out)):
+            for k, st in enumerate(stages):
+                out += [(f"{verb} {k + 1} {name}", leg) for name, leg in st.legs.items()]
+            if last is not None:
+                out.append((f"{verb} out", last))
+        return out + [(f"route {name}", leg) for name, leg in self.routes.items()]
+
+
+@dataclass(frozen=True)
 class Drawer:
     id: str
     row: int
@@ -102,6 +143,8 @@ class Drawer:
     #: False: the calib says no plan opens it (sim-scene 13:10: the bottom row with the wrist kept out of
     #: the base); never opened, never offered to the VLM
     usable: bool = True
+    #: sim-scene's verified joint waypoints for opening, closing and moving between the views (v3.2)
+    taught: Optional["Taught"] = None
 
     @property
     def knob_closed(self) -> Vec:
@@ -449,6 +492,69 @@ def _side_top(row: Dict[str, Any], cabinet: Dict[str, Any], open_m: float) -> Tu
         raise FixtureError(f"{row.get('id')} handle_grasp: missing {exc}") from exc
 
 
+_LEG_NAMES = {"in": ("in", "standoff", "approach"), "to_handle": ("to_handle", "to-handle", "grasp"),
+              "pull": ("pull", "push", "slide"), "back_off": ("back_off", "back-off", "backoff", "retreat")}
+
+
+def _leg(drawer_id: str, what: str, raw: Any) -> "TaughtLeg":
+    if isinstance(raw, dict):
+        q, tcp, speed = raw.get("q_deg", raw.get("q")), raw.get("tcp_m"), raw.get("speed")
+    else:
+        q, tcp, speed = raw, None, None
+    if not isinstance(q, list) or len(q) < 1 or not all(isinstance(a, (list, tuple)) and len(a) == 6 for a in q):
+        raise FixtureError(f"{drawer_id} taught {what}: needs q_deg, a list of 6 joint angles each")
+    qs = tuple(tuple(float(x) for x in a) for a in q)
+    for a, b in zip(qs, qs[1:]):
+        if max(abs(x - y) for x, y in zip(a, b)) > 2.0 + 1e-6:
+            raise FixtureError(f"{drawer_id} taught {what}: waypoints {a} -> {b} more than 2 deg apart")
+    if tcp is not None and (not isinstance(tcp, list) or len(tcp) != len(qs)):
+        raise FixtureError(f"{drawer_id} taught {what}: tcp_m must match q_deg one for one")
+    return TaughtLeg(qs, None if tcp is None else tuple(_vec(t) for t in tcp),  # type: ignore[misc]
+                     None if speed is None else int(speed))
+
+
+def _taught_stage(drawer_id: str, what: str, st: Dict[str, Any], cabinet: Dict[str, Any]) -> "TaughtStage":
+    nested = st.get("legs") or st.get("q_deg")
+    src = nested if isinstance(nested, dict) else st  # the legs inside the stage, or under "legs"/"q_deg"
+    legs = {}
+    for name, aliases in _LEG_NAMES.items():
+        raw = next((src[a] for a in aliases if src.get(a) is not None), None)
+        if raw is None:
+            raise FixtureError(f"{drawer_id} taught {what}: no {name} leg")
+        legs[name] = _leg(drawer_id, f"{what} {name}", raw)
+    if "from_m" not in st or "to_m" not in st:
+        raise FixtureError(f"{drawer_id} taught {what}: needs from_m and to_m")
+
+    def grip(*keys: str) -> Optional[int]:
+        v = _first(st, *keys)
+        v = v if v is not None else _first(cabinet, *(k + "_value" for k in keys if not k.endswith("_value")))
+        return None if v is None else int(v)
+
+    return TaughtStage(float(st["from_m"]), float(st["to_m"]), legs, grip("preshape", "preshape_value"),
+                       grip("close", "close_value"), grip("release", "release_value"))
+
+
+def _taught(row: Dict[str, Any], cabinet: Dict[str, Any]) -> Optional["Taught"]:
+    """A drawer's ``taught`` section (layout on BOARD 2026-11-02): open/close stage lists, each ending in an
+    {"out": ...} entry, and the routes between the views."""
+    t = row.get("taught")
+    if not t:
+        return None
+    seqs: Dict[str, Tuple[List["TaughtStage"], Optional["TaughtLeg"]]] = {}
+    for verb in ("open", "close"):
+        stages, out = [], None
+        for k, st in enumerate(t.get(verb) or ()):
+            if set(st) == {"out"}:
+                out = _leg(row["id"], f"{verb} out", st["out"])
+            else:
+                stages.append(_taught_stage(row["id"], f"{verb}[{k}]", st, cabinet))
+        if not stages:
+            raise FixtureError(f"{row['id']} taught: no {verb} stages")
+        seqs[verb] = (stages, out)
+    routes = {str(n): _leg(row["id"], f"route {n}", r) for n, r in (t.get("routes") or {}).items()}
+    return Taught(tuple(seqs["open"][0]), tuple(seqs["close"][0]), seqs["open"][1], seqs["close"][1], routes)
+
+
 def from_dict(d: Dict[str, Any]) -> Fixture:
     """The ``cabinet`` / ``catalogue`` / ``handover`` sections of a calib file."""
     try:
@@ -483,6 +589,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
                 stages=tuple(_stage(row["id"], k, st, grasp, pull) for k, st in enumerate(row.get("handle_stages") or ()))
                 or _side_top(row, grasp, open_m),
                 usable=bool(row.get("usable", row.get("openable", not row.get("disabled", False)))),
+                taught=_taught(row, grasp),
             )
             if dr.id != f"r{dr.row}c{dr.col}":
                 raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")

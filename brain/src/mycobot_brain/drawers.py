@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from mycobot_brain import collision, drawer_vlm, grounding, kinematics
-from mycobot_brain.fixture import Drawer, Fixture, HandleStage, Shape
+from mycobot_brain.fixture import Drawer, Fixture, HandleStage, Shape, TaughtLeg
 from mycobot_brain.kinematics import IKError, Vec
 from mycobot_brain.pickplace import DOWN, TILTS_DEG, PathBlocked, PickPlace, PickPlaceError, Settings, _r
 
@@ -101,6 +101,9 @@ class DrawerTask(PickPlace):
         #: what the fingers may come close to in the moves now being made (see :meth:`_near`).
         self._ctx: Dict[str, Any] = {}
         self._lifted: Optional[List[float]] = None  # the arm after the last lift, holding the object
+        #: sim-scene's verified routes between the views (calib v3.2), played instead of planning
+        self._routes: List[Tuple[str, TaughtLeg]] = [(f"{d.id} {name}", leg) for d in self.fx.drawers.values()
+                                                     if d.taught for name, leg in d.taught.routes.items()]
         #: how far the open fingers reach out from the TCP axis: the calib's finger capsules, else the setting.
         self._finger_reach = self.s.finger_half_m
         robot = self.calib.robot
@@ -123,6 +126,10 @@ class DrawerTask(PickPlace):
         if state["angles_deg"] is None:
             raise PickPlaceError("the arm server has no joint reading to start from")
         cmd = self._parse(instruction)
+        fk = self.taught_fk_mm()
+        if fk is not None:
+            self.log.event("taught", drawers=sorted(d for d, x in self.fx.drawers.items() if x.taught),
+                           routes=len(self._routes), fk_vs_calib_tcp_max_mm=round(fk, 3))
         if s.execute:
             self.link.enable()
             self.enabled = True
@@ -153,6 +160,9 @@ class DrawerTask(PickPlace):
         """Without --execute: the command as read, and whether the arm can reach the handles."""
         reach = {}
         for d in self.fx.drawers.values():
+            if d.taught:
+                reach[d.id] = 0.0  # played as sim-scene taught it
+                continue
             try:
                 a, _ = self._handle_frame(d)
                 reach[d.id] = round(math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(
@@ -169,6 +179,9 @@ class DrawerTask(PickPlace):
         for d in sorted(self.fx.drawers):
             if not self.fx.drawers[d].usable:
                 self.log.event("unreachable", drawer=d, why="not in use (calib)")
+                continue
+            if self.fx.drawers[d].taught:
+                reachable.append(d)  # sim-scene's verified motions open it
                 continue
             try:
                 self._handle_plan(self.fx.drawers[d])
@@ -430,6 +443,14 @@ class DrawerTask(PickPlace):
     def _move_handle(self, d: Drawer, start: float, end: float, verb: str) -> None:
         """Move ``d`` from ``start`` m out to ``end``: per stage of its pull that the move covers (in
         order to open, backwards to shut), grasp the handle, move it, let go, back off."""
+        t = d.taught
+        if t is not None:
+            stages = t.open if end > start else t.close
+            lo, hi = min(s.from_m for s in stages), max(s.to_m for s in stages)
+            if (abs(start - lo) < 2e-3 and abs(end - hi) < 2e-3) or (abs(start - hi) < 2e-3 and abs(end - lo) < 2e-3):
+                self._taught_handle(d, verb)
+                return
+            self.log.event("skip", why=f"{verb} {d.id} from {start:.3f} to {end:.3f} m: not a taught sequence, planned")
         plans = self._handle_plan(d)
         legs: List[Tuple[int, HandlePlan, float, float]] = []
         for k, plan in enumerate(plans):
@@ -483,6 +504,70 @@ class DrawerTask(PickPlace):
             out = plan.in_axis if plan.in_axis is not None else a_now
             self._line(_add(fx.stage_tcp(stage, end), out, -fx.stage_standoff(stage, end)), f"{tag}: back off",
                        a_now, j_now, either_jaw=either)
+
+    def _taught_handle(self, d: Drawer, verb: str) -> None:
+        """Open or shut ``d`` along sim-scene's verified waypoints (calib v3.2): per stage, preshape, in,
+        to the handle, close, pull (or push), let go, back off; then out to the cabinet look."""
+        t = d.taught
+        assert t is not None
+        stages, out = (t.open, t.open_out) if verb == "open" else (t.close, t.close_out)
+        c = self.calib
+        self._phase(f"{verb} {d.id}")
+        for k, st in enumerate(stages):
+            tag = f"{verb} {d.id}" + ("" if len(stages) == 1 else f" ({k + 1}/{len(stages)})")
+            release = st.release if st.release is not None else c.gripper_open
+            self._gripper(st.preshape if st.preshape is not None else release, "open")
+            self._play(st.legs["in"], f"{tag}: pre-grasp", first=k == 0)
+            with self._near(skip=d.id, at_handle=True):
+                self._play(st.legs["to_handle"], f"{tag}: to handle")
+                self._gripper(st.close if st.close is not None else c.gripper_closed, "close")
+                with self._near(moving=d.id):
+                    self._play(st.legs["pull"], tag, speed=self.s.handle_speed)
+                self.opening[d.id] = st.to_m if verb == "open" else st.from_m
+                self._gripper(release, "open")
+                self._play(st.legs["back_off"], f"{tag}: back off")
+        if out is not None:
+            self._play(out, f"{verb} {d.id}: cabinet look")
+
+    def _play(self, leg: TaughtLeg, phase: str, speed: Optional[int] = None, first: bool = False) -> None:
+        """Send a taught leg as it is. More than 3 deg from its first waypoint, go there first by a checked
+        move. The brain's checker looks at it too, but only to log (leader 2026-11-02 12:24)."""
+        here = self._measured()
+        start = list(leg.q[0])
+        if max(abs(a - b) for a, b in zip(here, start)) > 3.0:
+            # Not low over the table, where an object may stand (the handover mat).
+            self._goto(start, f"{phase}: to the taught start", floor=self.calib.table_z + self.s.leave_mat_m
+                       if first else None, taught=False)
+            here = self._measured()
+        path = [list(q) for q in leg.q[1:]]
+        if not path:
+            return
+        why = self._path_clear([here] + path, points=False, **self._ctx)
+        if why is not None:
+            self.log.event("taught_check", phase=phase, why=why)
+        self._send(path, phase, leg.speed or speed or self.s.speed)
+
+    def _taught_route(self, here: Sequence[float], goal: Sequence[float]) -> Optional[Tuple[str, TaughtLeg]]:
+        """A taught route that starts where the arm is (3 deg) and ends at ``goal`` (0.5 deg)."""
+        for name, leg in self._routes:
+            if max(abs(a - b) for a, b in zip(here, leg.q[0])) <= 3.0 and \
+                    max(abs(a - b) for a, b in zip(goal, leg.q[-1])) <= 0.5:
+                return name, leg
+        return None
+
+    def taught_fk_mm(self) -> Optional[float]:
+        """Largest distance, over every taught waypoint that has sim-scene's TCP, between that and this
+        chain's FK at the same angles (the two sides agree on the arm); None without any."""
+        worst = None
+        chain = self.calib.chain
+        for d in self.fx.drawers.values():
+            if not d.taught:
+                continue
+            for _, leg in d.taught.legs():
+                for q, tcp in zip(leg.q, leg.tcp or ()):
+                    e = math.dist(kinematics.position(chain.pose(q, "tcp")), tcp) * 1000
+                    worst = e if worst is None else max(worst, e)
+        return worst
 
     def _open(self, d: Drawer, again: bool = False) -> None:
         # ``again``: the VLM does not see it open, so pull from shut whatever the code thinks.
@@ -679,6 +764,9 @@ class DrawerTask(PickPlace):
             options += [over] if over is not None else []
             q = None
             for option in options:
+                if self._taught_route(self._measured(), option) is not None:
+                    q = option
+                    break
                 vias, _, why = self._route(self._measured(), option, None, **self._ctx)
                 if vias is None:
                     self.log.event("skip", why=f"no close look from here: {why}")
@@ -1007,10 +1095,16 @@ class DrawerTask(PickPlace):
                 straight = why
         return None, "", straight
 
-    def _goto(self, goal: Sequence[float], phase: str, floor: Optional[float], speed: Optional[int] = None) -> None:
-        """As pick-place's, but round what is in the way (:meth:`_route`), and the floor is no higher than
-        where the path starts."""
+    def _goto(self, goal: Sequence[float], phase: str, floor: Optional[float], speed: Optional[int] = None,
+              taught: bool = True) -> None:
+        """As pick-place's, but along a taught route where there is one (:meth:`_taught_route`), else round
+        what is in the way (:meth:`_route`), and the floor is no higher than where the path starts."""
         here = self._measured()
+        route = self._taught_route(here, goal) if taught else None
+        if route is not None:
+            self.log.event("taught", phase=phase, route=route[0])
+            self._play(route[1], phase, speed)
+            return
         if floor is not None:
             # sim-scene's tilted looks into r1c2 and r2c2 hold the TCP beside the drawer below the
             # floor for above it (wall top + 2 cm): the path may not go lower than it starts (D3 s451).

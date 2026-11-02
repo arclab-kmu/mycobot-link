@@ -453,6 +453,8 @@ def from_dict(spec: Dict[str, Any], chain: Chain) -> RobotBody:
     for h in hulls:
         if chain.frame_depth(h.frame) == 0:
             still = still | {h.name}
+    # v3.1's check.no_fixture_check: links that never come near the fixture (joint2 turns above the base).
+    still = still | frozenset((spec.get("check") or {}).get("no_fixture_check") or ())
     return RobotBody(capsules, pairs, finger_set, still, boxes=boxes, hand=hand_set, hulls=hulls)
 
 
