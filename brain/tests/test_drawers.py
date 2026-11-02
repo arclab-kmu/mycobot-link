@@ -5,7 +5,7 @@ import cabinet_scene as cs
 import pytest
 from test_pickplace import START, camera, sent, teleporting  # noqa: F401 (fixtures)
 
-from mycobot_brain import calib, drawer_vlm, drawers, kinematics, pickplace
+from mycobot_brain import calib, drawer_vlm, drawers, fixture, kinematics, pickplace
 
 FAST = dict(settle=0.02, gripper_wait=0.02, arrive_timeout=3.0)
 FIND = "노란색 원뿔 찾아서 꺼내 줘"
@@ -450,25 +450,37 @@ def test_a_put_grips_on_the_mat_at_the_yaw_that_arrives_along_the_pick_jaw(link,
 def test_a_put_spot_is_one_the_arm_reaches_at_the_carry_height(tmp_path):
     """D3 v3.2 s461 (fc0e8d6): beside a sphere at (0.187, 0.078) in r2c0 the roomiest spot was at the back
     left, where straight down the arm reaches only under the height that clears r2c0's front panel. The
-    spot is now the roomiest one the arm reaches there, in front of the tray and down to the release."""
+    spot is one the arm reaches there, in front of the tray and down to the release - and since D3 v3.3
+    s461 (93c69cf: the cone set 21 mm from the sphere's centre leant on it at 45 deg) only one whose
+    footprint keeps 3 mm from the sphere's and whose opened pads keep 2 mm off the walls and the sphere;
+    with the sphere at the middle of the 72 mm tray there is none, and the put is refused (leader 18:5x)."""
     scene = cs.load_sim_like()
     task = drawers.DrawerTask(None, None, scene, None, pickplace.RunLog(tmp_path / "t"), drawers.DrawerSettings())
     task._measured = lambda: list(scene.fixture.cabinet_look_pose_deg)
-    d, cone = scene.fixture.drawers["r2c0"], scene.fixture.shapes["cone"]
-    sphere = [(0.187, 0.078, d.floor_z)]
+    fx = scene.fixture
+    d, cone, sphere = fx.drawers["r2c0"], fx.shapes["cone"], fx.shapes["sphere"]
     release_z, least = task._put_heights(d.floor_z, cone, task._wall_top(d), task.s.drawer_clear_m)
-    roomiest = scene.fixture.free_spot(d, scene.fixture.open_m, sphere, cone.width)
-    assert not task._reaches(roomiest, least)  # the old choice
-    spot, spare = task._put_spot(d, sphere, cone)
-    assert spot is not None and task._reaches(spot, least) and task._reaches(spot, release_z)
-    assert task._reaches(task._front_of(d, spot, cone.width), least)
-    # The most room from the sphere among the spots the arm reaches (5 mm steps): with the sphere in the
-    # middle of a 72 mm tray none is a full cone's width away (2eb3e4c set this cone at the same spot).
-    gap = math.hypot(spot[0] - 0.187, spot[1] - 0.078)
-    for p, g, _ in scene.fixture.free_spots(d, scene.fixture.open_m, sphere, cone.width):
-        if task._reaches(p, least) and task._reaches(task._front_of(d, p, cone.width), least) \
-                and task._reaches(p, release_z):
-            assert g < gap + 0.005
+    near_back = [((0.187, 0.078, d.floor_z), sphere)]
+    roomiest = fx.free_spot(d, fx.open_m, [near_back[0][0]], cone.width)
+    assert not task._reaches(roomiest, least)  # the fc0e8d6 choice
+    spot, spare, jaw, why = task._put_spot(d, near_back, cone)
+    if spot is not None:
+        assert task._reaches(spot, least) and task._reaches(spot, release_z)
+        assert task._reaches(task._front_of(d, spot, cone.width), least)
+        gap = math.hypot(spot[0] - 0.187, spot[1] - 0.078) - (cone.width + sphere.width) / 2
+        assert gap >= task.s.footprint_gap_m
+        assert task._release_clear(d, spot, jaw, release_z, []) is None
+    else:
+        assert why
+    # The sphere in the middle of the tray: no spot keeps 3 mm, so none is offered.
+    c = fx.interior_center(d, fx.open_m)
+    middle = [((c[0], c[1], d.floor_z), sphere)]
+    spot, _, jaw, why = task._put_spot(d, middle, cone)
+    assert spot is None and jaw is None and "mm of another object" in why
+    # An empty tray: a spot, with a jaw whose opened pads clear the walls (these made-up fingers reach
+    # too far for the pick jaw across the 72 mm tray; the calib's hulls do not).
+    spot, _, jaw, why = task._put_spot(d, [], cone)
+    assert spot is not None and why == "" and task._release_clear(d, spot, jaw, release_z, []) is None
 
 
 def test_the_brain_keeps_off_what_it_set_down(tmp_path):
@@ -488,13 +500,22 @@ def test_the_brain_keeps_off_what_it_set_down(tmp_path):
     assert name == "set-down cone on the mat"
     why = task._path_clear([up, at], points=False)
     assert why is not None and "set-down cone on the mat" in why
-    assert task._path_clear([at, up], points=False, released=name) is None  # the retreat from it
+    # The retreat straight up from it: the fingers are excused from the margin, never from contact (leader
+    # 18:5x). These made-up fingers do not open (fixed boxes 8 mm off the axis): they touch the 30 mm cone,
+    # and clear a 10 mm peg.
+    why = task._path_clear([at, up], points=False, released=name)
+    assert why is not None and why.startswith("gripper_") and "set-down cone" in why
     task._forget(name)
     assert task._path_clear([up, at], points=False) is None
+    peg = fixture.Shape("peg", cone.height, 0.010, cone.grasp_height)
+    name = task._leave(peg, (hx, hy, scene.table_z), None)
+    assert task._path_clear([at, up], points=False, released=name) is None
+    task._forget(name)
     # In a drawer: it moves with the drawer, and the drawer moving with the hand takes it along.
     d = fx.drawers["r1c1"]
     task.opening[d.id] = fx.open_m
     inside = task._leave(cone, (0.2, 0.0, d.floor_z), d)
     (box,) = task._known_boxes({d.id: 0.0})
-    assert box[0] == inside and box[1][0] == pytest.approx(0.2 - cone.width / 2 + fx.open_m)  # pushed in along +x
+    assert box[0] == inside and box[1][0] == pytest.approx(0.2 + fx.open_m)  # pushed in along +x
+    assert box[3] == pytest.approx(cone.width / 2)  # an upright cylinder of its catalogue radius
     assert task._known_boxes({d.id: 0.0}, moving=d.id) == []

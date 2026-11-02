@@ -27,8 +27,9 @@ sim() { $SIM_SSH "printf '%s\n' '$1' | nc -q1 127.0.0.1 47950"; }
 
 mkdir -p "$DIR"
 echo "== $RUN"
-printf '{"run": "%s", "seed": %s, "layout": "%s", "instruction": "%s", "drawer": "%s", "brain_args": "%s"}\n' \
-  "$RUN" "$SEED" "$LAYOUT" "$INSTRUCTION" "$DRAWER" "${BRAIN_ARGS:-}" >"$DIR/meta.json"
+# EXPECT=refusal: the command is infeasible and the run shows the brain refusing it cleanly (d3_score.py).
+printf '{"run": "%s", "seed": %s, "layout": "%s", "instruction": "%s", "drawer": "%s", "brain_args": "%s", "expect": "%s"}\n' \
+  "$RUN" "$SEED" "$LAYOUT" "$INSTRUCTION" "$DRAWER" "${BRAIN_ARGS:-}" "${EXPECT:-}" >"$DIR/meta.json"
 if [ "$LAYOUT" = find ]; then
   sim "{\"op\":\"reset\",\"seed\":$SEED}"
 else
@@ -43,8 +44,14 @@ sim "{\"op\":\"record\",\"on\":true,\"run\":\"$RUN\"}"
 (cd "$(dirname "$0")/../brain" && "$UV" run mycobot-brain drawer "$INSTRUCTION" \
   --calib "$CALIB" --execute --record "$DIR" ${BRAIN_ARGS:-}) >"$DIR/cli.log" 2>&1
 echo "exit $?" | tee -a "$DIR/cli.log"
-sleep 1.5  # objects at rest before they are scored
-sim '{"op":"truth"}' | tee "$DIR/truth.json" >/dev/null
+# Objects at rest before they are scored: every one under 5 mm/s, 3 s at most (leader 18:5x: a cylinder
+# rocking at 12 mm/s read 8 deg tilted at the snapshot).
+for _ in 1 2 3 4 5 6; do
+  sleep 0.5
+  sim '{"op":"truth"}' >"$DIR/truth.json"
+  python3 -c 'import json,sys; t=json.load(open(sys.argv[1])); sys.exit(max(o["speed_mps"] for o in t["objects"].values()) >= 0.005)' \
+    "$DIR/truth.json" && break
+done
 sim '{"op":"state"}' >"$DIR/state_after.json"
 sim '{"op":"record","on":false}'
 grep '"event": "result"' "$DIR/events.jsonl" | tail -1

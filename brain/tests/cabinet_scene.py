@@ -5,7 +5,10 @@ The world replays the run's ``move`` / ``gripper`` events: a gripper that
 closes on a handle drags the drawer along the pull axis as the TCP moves; one
 that closes on an object carries it; opening drops it on whatever is under it
 (an open drawer's floor, the handover zone, the table). So a test asserts what
-happened to the drawers and objects, not only what was sent.
+happened to the drawers and objects, not only what was sent. With the calib's
+hulls it also lists ``faults``: an object let go onto another's footprint, and a
+finger hull touching the table, a tray, or an object standing (leader 18:5x:
+the pads are never excused from contact; D0 must not plan what the sim tips).
 """
 
 import functools
@@ -14,7 +17,7 @@ import math
 import re
 from pathlib import Path
 
-from mycobot_brain import calib, drawer_vlm, kinematics
+from mycobot_brain import calib, collision, drawer_vlm, kinematics
 
 SIM = json.loads((Path(__file__).parent / "data" / "sim_calib.json").read_text())
 
@@ -99,6 +102,8 @@ class World:
         self.grip = None  # ("handle", drawer id, the calib's HandleStage) or ("object", id, offset)
         self.angles = list(scene.look_pose_deg)
         self._seen = 0
+        self.faults = []  # what the sim would have tipped or touched: see the module's doc
+        self.jaw = 1.0  # how far open the pads are (0..1), as the gripper values say
 
     # -- where things are ------------------------------------------------------
 
@@ -126,6 +131,8 @@ class World:
         self._seen = len(lines)
 
     def move(self, q):
+        for step in collision.densify([self.angles, list(q)])[1:]:
+            self._touch(step)
         self.angles = list(q)
         p = self.tcp()
         if self.grip and self.grip[0] == "handle":
@@ -138,6 +145,8 @@ class World:
             o["z"] = p[2] + self.grip[2][2]
 
     def gripper(self, value):
+        o, c = self.c.gripper_open, self.c.gripper_closed
+        self.jaw = min(max((value - c) / (o - c), 0.0), 1.0) if o != c else 1.0
         p = self.tcp()
         if value < 50 and self.grip is None:
             for d in self.fx.drawers.values():
@@ -157,10 +166,22 @@ class World:
                         o["xy"], o["drawer"] = [q[0], q[1]], None
                     o["held"] = True
                     self.grip = ("object", oid, (q[0] - p[0], q[1] - p[1], q[2] - p[2]))
+                    g = self.c.jaw_gap
+                    if g and g[1] > g[0]:  # the pads stop on it
+                        self.jaw = min(max((shape.width - g[0]) / (g[1] - g[0]), 0.0), 1.0)
                     return
         elif value >= 50 and self.grip is not None:
             if self.grip[0] == "object":
                 self._drop(self.grip[1])
+            else:
+                # Let go of a handle within 5 mm of a stage's end: the drawer is there, as sim-scene's D1
+                # measured the taught pulls (99.1-100 mm); following the TCP alone left r0c1's two-stage
+                # pull 3.6 mm short, a front panel the sim does not have.
+                d_id = self.grip[1]
+                ends = {0.0, self.fx.open_m} | {e for st in self.fx.stages(self.fx.drawers[d_id]) for e in (st.from_m, st.to_m)}
+                end = min(ends, key=lambda x: abs(self.opening[d_id] - x))
+                if abs(self.opening[d_id] - end) < 0.005:
+                    self.opening[d_id] = end
             self.grip = None
 
     def _drop(self, oid):
@@ -174,8 +195,49 @@ class World:
                     and d.floor_z - 0.002 <= bottom:
                 a, s = self.fx.pull_axis, self.opening[d.id]
                 o.update(drawer=d.id, xy=[x - s * a[0], y - s * a[1]], z=d.floor_z + shape.height / 2, fell=bottom - d.floor_z)
+                self._overlap(oid)
                 return
         o.update(z=self.c.table_z + shape.height / 2, fell=bottom - self.c.table_z)
+        self._overlap(oid)
+
+    def _overlap(self, oid):
+        """A fault if ``oid``, just let go, stands on another object's footprint (catalogue widths)."""
+        o, p = self.objects[oid], self.pos(oid)
+        for k, v in self.objects.items():
+            if k == oid or v["held"] or v["drawer"] != o["drawer"]:
+                continue
+            need = (self.fx.shapes[o["shape"]].width + self.fx.shapes[v["shape"]].width) / 2
+            gap = math.hypot(p[0] - self.pos(k)[0], p[1] - self.pos(k)[1]) - need
+            if gap < 0:
+                self.faults.append(f"{oid} let go {-gap * 1000:.1f} mm into {k}'s footprint")
+
+    def _touch(self, q):
+        """A fault if at ``q`` a finger hull touches the table, an open tray, or an object standing (the
+        one held, or centred between the pads, excepted). Handles are the taught motions' and sim-scene's D1:
+        not checked here."""
+        robot = self.c.robot
+        if robot is None or not robot.hulls:
+            return
+        boxes = [("table", (-9.0, -9.0, -9.0), (9.0, 9.0, self.c.table_z))]
+        tcp = kinematics.position(self.c.chain.pose(q, "tcp"))
+        for d_id, s in self.opening.items():
+            if s > 0.001:
+                d = self.fx.drawers[d_id]
+                # At its handle the pads grip the knob just in front of the panel; this box is coarser than
+                # the sim's panel, and sim-scene's audit holds the taught grips (D1: 0 contacts).
+                at_handle = math.dist(tcp, self.fx.knob(d, s)) < 0.04
+                boxes += [b for b in self.fx.tray_parts(d, s) if not (at_handle and b[0].endswith(" front"))]
+        held = self.grip[1] if self.grip and self.grip[0] == "object" else None
+        for k, v in self.objects.items():
+            # Not the one held, nor the one centred between the pads (being closed on, or just let go: the
+            # brain's own guard keeps the retreat off it; this cylinder is wider than a cube's faces).
+            if k == held or math.hypot(self.pos(k)[0] - tcp[0], self.pos(k)[1] - tcp[1]) < 0.008:
+                continue
+            p, sh = self.pos(k), self.fx.shapes[v["shape"]]  # an upright cylinder of the catalogue radius
+            boxes.append((k, (p[0], p[1], p[2] - sh.height / 2), (p[0], p[1], p[2] + sh.height / 2), sh.width / 2))
+        hit = robot.hull_gaps(self.c.chain, q, boxes, 1e-4, lambda name, box: name not in robot.fingers, jaw=self.jaw)
+        if hit is not None and (not self.faults or not self.faults[-1].startswith(f"{hit[0]} on {hit[1]}")):
+            self.faults.append(f"{hit[0]} on {hit[1]} at {[round(a, 1) for a in q]}")
 
     # -- what a test asserts --------------------------------------------------------
 

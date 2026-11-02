@@ -98,6 +98,10 @@ class Settings:
     #: the arm off an object the brain set down or saw waiting (leader 16:58: D3 v3.2 s502_e, a taught
     #: close and the move off it tipped the cone just handed over; 5 mm as the zone search asked)
     object_margin_m: float = 0.005
+    #: the pads, excused from the margins where they grasp and let go, still keep this off everything but
+    #: the handle they pinch: excused from the margin, never from contact (leader 18:5x, the audit is strict).
+    #: 1 mm: a taught pull ends up to ~0.5 mm short of the calib's opening (D0 v3.3, take r0c1 corner).
+    pad_contact_m: float = 0.001
     check_step_deg: float = collision.CHECK_STEP_DEG
 
 
@@ -492,22 +496,39 @@ class PickPlace:
 
     def _robot_clear(self, q: Sequence[float], boxes: Sequence[Tuple[str, Sequence[float], Sequence[float]]],
                      fingers_near: Any = (), grasping: bool = False, jaw: Any = "now",
-                     objects: Sequence[Tuple[str, Sequence[float], Sequence[float]]] = ()) -> Optional[str]:
+                     objects: Sequence[Tuple[str, Sequence[float], Sequence[float]]] = (),
+                     pinched: Any = ()) -> Optional[str]:
         """None if at ``q`` the listed link pairs and every moving link and ``boxes`` (name, lo, hi) keep
         ``robot_margin_m`` apart; the finger links may come closer to the boxes in ``fingers_near``
-        (``all``: every box), and while ``grasping`` the hand bodies to ``hand_margin_m`` of any box. The pads'
-        hulls sit at ``jaw`` (0 shut .. 1 open; "now": as last commanded; None: swept over the travel).
-        ``objects`` (boxes round objects standing in the scene) keep ``object_margin_m`` from every link."""
+        (``all``: every box), with the calib's hulls to ``pad_contact_m`` - into contact only with those in
+        ``pinched`` (the handle they grip; ``all`` with ``fingers_near="all"``) - and while ``grasping`` the
+        hand bodies to ``hand_margin_m`` of any box. The made-up capsules of a calib without hulls only
+        excuse them, as before: too coarse round the pads to tell contact. The
+        pads' hulls sit at ``jaw`` (0 shut .. 1 open; "now": as last commanded; None: swept over the
+        travel). ``objects`` (boxes round objects standing in the scene) keep ``object_margin_m`` from
+        every link."""
         robot, m = self.calib.robot, self.s.robot_margin_m
         assert robot is not None
         placed = robot.place(self.calib.chain, q)
         why = robot.self_hit(placed, m)
         if why is not None:
             return why
+
+        def excused(name: str, box: str) -> bool:
+            return name in robot.fingers and (fingers_near == "all" or box in fingers_near)
+
+        if fingers_near == "all" and not pinched:
+            pinched = "all"
+
+        def touching(name: str, box: str) -> bool:
+            return name in robot.fingers and (pinched == "all" or box in pinched)
+
         if robot.hulls:
-            hit = robot.hull_gaps(self.calib.chain, q, boxes, self.s.hull_margin_m + self._plan_buffer, lambda name, box: (
-                name in robot.fingers and (fingers_near == "all" or box in fingers_near)),
-                jaw=self._jaw_open if jaw == "now" else jaw)
+            at = self._jaw_open if jaw == "now" else jaw
+            hit = robot.hull_gaps(self.calib.chain, q, boxes, self.s.hull_margin_m + self._plan_buffer, excused, jaw=at)
+            if hit is None:
+                hit = robot.hull_gaps(self.calib.chain, q, boxes, self.s.pad_contact_m,
+                                      lambda name, box: not excused(name, box) or touching(name, box), jaw=at)
             if hit is not None:
                 return f"{hit[0]} {hit[2] * 1000:.1f} mm from the {hit[1]}"
             return self._object_hit(q, objects, fingers_near, jaw)
@@ -518,10 +539,9 @@ class PickPlace:
             name, r = p.capsule.name, p.capsule.radius
             if name in robot.still:
                 continue
-            finger = name in robot.fingers
             mf = self.s.hand_margin_m if grasping and name in robot.hand else m
             for box, lo, hi in boxes:
-                if finger and (fingers_near == "all" or box in fingers_near):
+                if excused(name, box):
                     continue
                 gap = collision.box_distance(p.a, p.b, lo, hi, within=r + mf) - r
                 if gap < mf:
@@ -531,22 +551,34 @@ class PickPlace:
     def _object_hit(self, q: Sequence[float], objects: Sequence[Tuple[str, Sequence[float], Sequence[float]]],
                     fingers_near: Any = (), jaw: Any = "now", placed: Optional[Sequence[Any]] = None) -> Optional[str]:
         """Why not, if at ``q`` a link (hull, else capsule) comes within ``object_margin_m`` of one of
-        ``objects``; the fingers are excused from those in ``fingers_near`` (the one just let go)."""
+        ``objects``; the fingers only within ``pad_contact_m`` of those in ``fingers_near`` (the one just
+        let go, which they are still beside)."""
         robot, m = self.calib.robot, self.s.object_margin_m
         if not objects or robot is None:
             return None
+
+        def excused(name: str, box: str) -> bool:
+            return name in robot.fingers and (fingers_near == "all" or box in fingers_near)
+
         if robot.hulls:
-            hit = robot.hull_gaps(self.calib.chain, q, objects, m, lambda name, box: (
-                name in robot.fingers and (fingers_near == "all" or box in fingers_near)),
-                jaw=self._jaw_open if jaw == "now" else jaw)
+            at = self._jaw_open if jaw == "now" else jaw
+            hit = robot.hull_gaps(self.calib.chain, q, objects, m, excused, jaw=at)
+            if hit is None:
+                hit = robot.hull_gaps(self.calib.chain, q, objects, self.s.pad_contact_m,
+                                      lambda name, box: not excused(name, box), jaw=at)
             return None if hit is None else f"{hit[0]} {hit[2] * 1000:.1f} mm from the {hit[1]}"
         for p in placed if placed is not None else robot.place(self.calib.chain, q):
             name, r = p.capsule.name, p.capsule.radius
             if name in robot.still:
                 continue
-            for box, lo, hi in objects:
-                if name in robot.fingers and (fingers_near == "all" or box in fingers_near):
+            for entry in objects:
+                box, lo, hi = entry[0], entry[1], entry[2]
+                rnd = float(entry[3]) if len(entry) > 3 else 0.0  # type: ignore[misc]
+                if excused(name, box):
                     continue
+                # A capsule's own round end over-reaches a cylinder's top: its square instead, as these
+                # coarse capsules always met it.
+                lo, hi = (lo[0] - rnd, lo[1] - rnd, lo[2]), (hi[0] + rnd, hi[1] + rnd, hi[2])
                 gap = collision.box_distance(p.a, p.b, lo, hi, within=r + m) - r
                 if gap < m:
                     return f"{name} {gap * 1000:.0f} mm from the {box}"

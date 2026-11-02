@@ -258,7 +258,7 @@ def test_the_hand_keeps_2_mm_off_the_scene_only_while_it_grasps(tmp_path):
     assert task._robot_clear(q, post, "all", grasping=True) is None
     # Which moves count as grasping: at a handle, in the drawer or on the mat it grasps on; not a free move.
     seen = []
-    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now", objects=(): seen.append(grasping)
+    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now", objects=(), pinched=(): seen.append(grasping)
     path = [q, q]
     for kw, want in ((dict(), False), (dict(at_handle=True, skip="r1c1"), True), (dict(grasp_in="r1c1"), True),
                      (dict(table=True), True)):
@@ -303,7 +303,7 @@ def test_with_hulls_the_pads_skip_only_the_handle_they_pinch(tmp_path):
     c = cs.load_sim_like_with_hulls()
     task = drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
     seen = []
-    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now", objects=(): seen.append(near)
+    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now", objects=(), pinched=(): seen.append(near)
     q = c.look_pose_deg
     task._path_clear([q, q], skip="r1c1", at_handle=True)
     assert seen[-1] == {"handle of r1c1"}
@@ -349,3 +349,18 @@ def test_a_pad_hull_sits_where_the_jaw_is_open_to(tmp_path):
     assert "gripper_left3" in task._robot_clear(q, post, (), jaw=1.0)
     assert task._robot_clear(q, post, (), jaw=0.0) is None
     assert "gripper_left3" in task._robot_clear(q, post, ())  # unknown: swept
+
+
+def test_a_hull_against_an_upright_cylinder():
+    """Objects standing are upright cylinders (catalogue radius) for the guard and the put spot: a box
+    entry's 4th field rounds it sideways. A unit hull 30 mm from a 10 mm cylinder's axis is 20 mm off it,
+    diagonally too, where the square of the same width would have been 15.9 mm off."""
+    cube = [(x, y, z) for x in (0.0, 0.01) for y in (0.0, 0.01) for z in (0.0, 0.01)]
+    moved = [(x + 0.03, y, z) for x, y, z in cube]
+    axis_lo, axis_hi = (0.0, 0.0, 0.0), (0.0, 0.0, 0.01)
+    assert collision.hull_box_distance(moved, axis_lo, axis_hi, round_m=0.01) == pytest.approx(0.02, abs=1e-6)
+    diag = [(x + 0.03 / math.sqrt(2), y + 0.03 / math.sqrt(2), z) for x, y, z in cube]
+    assert collision.hull_box_distance(diag, axis_lo, axis_hi, round_m=0.01) == pytest.approx(0.02, abs=1e-6)
+    square = collision.hull_box_distance(diag, (-0.01, -0.01, 0.0), (0.01, 0.01, 0.01))
+    assert square == pytest.approx(math.hypot(0.03 / math.sqrt(2) - 0.01, 0.03 / math.sqrt(2) - 0.01), abs=1e-6)
+    assert collision.hull_box_distance(cube, axis_lo, axis_hi, round_m=0.01) == 0.0  # overlapping

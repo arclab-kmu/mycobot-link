@@ -48,6 +48,11 @@ class DrawerSettings(Settings):
     pad_floor_clear_m: float = 0.001  # pad tips above a drawer floor or the table at the grasp
     leave_mat_m: float = 0.12  # TCP over the table before leaving the handover mat for the cabinet
     plan_buffer_m: float = 0.001  # extra hull clearance asked of a put planned before it is made
+    #: a put spot's footprint (catalogue radius, a cube's half diagonal) this far from every other one in the
+    #: drawer, for the estimates' error; and the opened pads this far off the walls and the other objects
+    #: at the release, at whichever jaw yaw fits (leader 18:5x, after D3 v3.3 s461)
+    footprint_gap_m: float = 0.003
+    pad_clear_m: float = 0.002
 
 
 def _add(a: Sequence[float], b: Sequence[float], s: float = 1.0) -> Vec:
@@ -252,17 +257,26 @@ class DrawerTask(PickPlace):
         # It waits on the mat while the drawer opens: the same guard as for one let go (leader 16:58).
         waiting = self._leave(shape, (start[0], start[1], c.table_z), None, how="waiting")
         look = self._open_and_look(d, None)
-        occupied = [self._object_xyz(d, o, look["angles"]) for o in look["objects"]]
-        spot, margin = self._put_spot(d, [p for p in occupied if p is not None], shape, start)
+        occupied: List[Tuple[Vec, Shape]] = []
+        for o in look["objects"]:
+            p = self._object_xyz(d, o, look["angles"])
+            if p is None:
+                # Not where it is, so not how much room it leaves: nothing goes in (leader 18:5x).
+                self._close(d)
+                return {"ok": False, "why": f"no room for a {desc} in {d.id}: could not place the "
+                                            f"{o['colour']} {o['shape']} in it"}
+            occupied.append((p, self._shape(o["shape"]) if o["shape"] in self.fx.shapes else self._widest()))
+        spot, margin, put_jaw, why = self._put_spot(d, occupied, shape, start)
         if spot is None:
+            # A clean refusal: the object stays on the mat, nothing enters the drawer (leader 18:5x).
             self._close(d)
-            return {"ok": False, "why": f"no room the arm reaches for a {desc} in {d.id}"}
-        self.log.event("spot", drawer=d.id, xyz=_r(spot, 4), occupied=[_r(p, 4) for p in occupied if p],
-                       reach_margin_m=round(margin, 3))
+            return {"ok": False, "why": f"no room for a {desc} in {d.id}: {why}"}
+        self.log.event("spot", drawer=d.id, xyz=_r(spot, 4), occupied=[_r(p, 4) for p, _ in occupied],
+                       reach_margin_m=round(margin, 3), jaw=_r(put_jaw, 3) if put_jaw else None)
         self._forget(waiting)  # the gripper goes to it now
         for attempt in range(1, self.s.attempts + 1):
             try:
-                self._pick_up(start, c.table_z, shape, desc, "table", jaw=self._put_yaw(start, spot, shape))
+                self._pick_up(start, c.table_z, shape, desc, "table", jaw=self._put_yaw(start, spot, shape, put_jaw))
                 break
             except NotHeld:
                 if attempt == self.s.attempts:
@@ -274,7 +288,7 @@ class DrawerTask(PickPlace):
                 raise PickPlaceError(f"lost the {desc} on the table: {found['seen']}")
             start = self._estimate(found["pick"], q, c.table_z + shape.height / 2, "pick", "table")
         self._put_down(spot, d.floor_z, shape, f"into {d.id}", wall_top=self._wall_top(d),
-                       clear=self.s.drawer_clear_m, drawer=d)
+                       clear=self.s.drawer_clear_m, drawer=d, put_jaw=put_jaw)
         self._phase("check put")
         self._goto(look["angles"], f"look: {d.id}", floor=None)
         check = self._check(drawer_vlm.put_question(desc, d), [("Before:", look["jpeg"])], "put")
@@ -870,7 +884,7 @@ class DrawerTask(PickPlace):
                 raise NotHeld(f"the {desc} was not held: {check['seen']}")
 
     def _put_down(self, xyz: Vec, surface_z: float, shape: Shape, where: str, wall_top: Optional[float],
-                  clear: float, drawer: Optional[Drawer] = None) -> None:
+                  clear: float, drawer: Optional[Drawer] = None, put_jaw: Optional[Vec] = None) -> None:
         """Carry what is held over ``xyz``, lower until its bottom is ``clear`` over the surface, let go.
 
         Into an opened ``drawer`` it goes by a point in front of the tray at carry height and then
@@ -893,7 +907,7 @@ class DrawerTask(PickPlace):
         # Into a drawer with the calib's pick jaw (sim-scene: along x, so the pads and the gripper body stay
         # between the tray's front and back walls), turned to in front of the tray; the yaw left over from
         # the table pick put the gripper body by the handles above (D3 v3.2 D0, put r0c0).
-        jaw = None if drawer is None else self._jaw(drawer, xyz)
+        jaw = None if drawer is None else (put_jaw if put_jaw is not None else self._jaw(drawer, xyz))
         off = 0.0
         if jaw is not None:
             # Gripped on the mat at the yaw that lands here (:meth:`_put_yaw`): if over the spot, J6 held,
@@ -993,28 +1007,47 @@ class DrawerTask(PickPlace):
             return None
         return min(max((width - g[0]) / (g[1] - g[0]), 0.0), 1.0)
 
-    def _put_spot(self, d: Drawer, occupied: Sequence[Sequence[float]], shape: Shape,
-                  start: Optional[Sequence[float]] = None) -> Tuple[Optional[Vec], float]:
-        """Where to put an object in ``d``: a free floor point the arm reaches at the carry height, over it and
-        in front of the tray, and down to where it lets go, and whose whole put (in over the front panel,
-        down, let go, up, out) passes the checker as it will be made; the most room from the other objects
-        first (5 mm steps), then the most reach to spare above the carry height, then the middle. D3 v3.2
-        s461 (fc0e8d6): the roomiest spot, behind a sphere at the back-left of r2c0, was out of reach at
-        the height that clears the front panel; in D0 the spot beside an object brought the gripper body by
-        the handle two rows up, or the opened pads by the drawer's own handle (leader 15:49). (None, 0) if
-        no spot qualifies."""
+    def _widest(self) -> Shape:
+        """The catalogue's widest shape: for an object the VLM names outside it."""
+        return max(self.fx.shapes.values(), key=lambda x: x.width)
+
+    def _put_spot(self, d: Drawer, occupied: Sequence[Tuple[Sequence[float], Shape]], shape: Shape,
+                  start: Optional[Sequence[float]] = None) -> Tuple[Optional[Vec], float, Optional[Vec], str]:
+        """Where to put an object in ``d``, beside ``occupied`` (where each object there is, and its shape):
+        a floor point whose footprint (catalogue radius; a cube's half diagonal) keeps ``footprint_gap_m``
+        from every other one, where the opened pads keep ``pad_clear_m`` off the walls and the other objects
+        at some jaw yaw (the calib's pick jaw first, then 15 deg steps either way to 90), that the arm
+        reaches at the carry height, over it and in front of the tray, and down to where it lets go, and
+        whose whole put (in over the front panel, down, let go, up, out) passes the checker as it will be
+        made. The most room first (5 mm steps), then the jaw least turned from the pick jaw, then reach to
+        spare above the carry height, then the middle.
+        Returns (spot, reach to spare, jaw, why not); spot None if none qualifies - a clean refusal (leader
+        18:5x: D3 v3.3 s461, a cone set 21 mm from a sphere's centre in a 72 mm tray leant on it at 45 deg)."""
         release_z, least = self._put_heights(d.floor_z, shape, self._wall_top(d), self.s.drawer_clear_m)
-        cands = self.fx.free_spots(d, self.fx.open_m, occupied, shape.width)
+        r_new = shape.width / 2
+        others = [(f"{o.name} at {_r(q, 3)}", (q[0], q[1], d.floor_z), (q[0], q[1], d.floor_z + o.height),
+                   o.width / 2) for q, o in occupied]
         bins: Dict[int, List[Tuple[Vec, float]]] = {}
-        for p, gap, mid in cands:
-            bins.setdefault(int(min(gap, 1.0) / 0.005), []).append((p, mid))
-        why = ""
+        why = {}
+        for p, _, mid in self.fx.free_spots(d, self.fx.open_m, [q for q, _ in occupied], shape.width, grid=9):
+            room = min((math.hypot(p[0] - q[0], p[1] - q[1]) - r_new - o.width / 2 for q, o in occupied), default=1.0)
+            if room < self.s.footprint_gap_m:
+                why.setdefault("room", f"every spot within {self.s.footprint_gap_m * 1000:.0f} mm of another object")
+                continue
+            bins.setdefault(int(min(room, 1.0) / 0.005), []).append((p, mid))
         for b in sorted(bins, reverse=True):
-            best: Optional[Tuple[float, float, Vec]] = None
+            best: Optional[Tuple[Tuple[float, float, float], Vec, Optional[Vec]]] = None
             for p, mid in bins[b]:
+                jaw, turn, pads = self._release_jaw(d, p, release_z, others)
+                if pads is not None:
+                    why.setdefault("pads", f"the opened pads: {pads}")
+                    continue
+                if best is not None and -turn < best[0][0]:
+                    continue
                 via = self._front_of(d, p, shape.width)
                 if not all(self._reaches(q, z) for q, z in ((p, least), (via, least), (p, (least + release_z) / 2),
                                                              (p, release_z))):
+                    why.setdefault("reach", "out of reach at the carry height")
                     continue
                 spare = 0.0
                 for dz in (0.01, 0.02, 0.03, 0.04, 0.05):
@@ -1022,34 +1055,77 @@ class DrawerTask(PickPlace):
                         spare = dz
                     else:
                         break
-                if best is not None and (spare, -mid) <= (best[0], -best[1]):
+                rank = (-turn, spare, -mid)
+                if best is not None and rank <= best[0]:
                     continue
                 if start is not None:
-                    blocked = self._put_blocked(d, p, via, shape, start, least, release_z)
+                    blocked = self._put_blocked(d, p, via, shape, start, least, release_z, jaw)
                     if blocked:
-                        why = blocked
+                        why["plan"] = f"the put would be refused: {blocked}"
                         continue
-                best = (spare, mid, p)
+                best = (rank, p, jaw)
             if best is not None:
-                return best[2], best[0]
-        if why:
-            self.log.event("skip", why=f"no put spot in {d.id} whose put passes: {why}")
-        return None, 0.0
+                return best[1], best[0][1], best[2], ""
+        words = "; ".join(why.values()) or "no floor left for it"
+        self.log.event("skip", why=f"no put spot in {d.id}: {words}")
+        return None, 0.0, None, words
+
+    def _release_jaw(self, d: Drawer, p: Sequence[float], release_z: float,
+                     others: Sequence[Tuple[str, Vec, Vec]]) -> Tuple[Optional[Vec], float, Optional[str]]:
+        """The jaw to let go at ``p`` with: the calib's pick jaw, else turned 15 deg at a time either way up to
+        90, the first whose opened pads keep ``pad_clear_m`` off ``d``'s walls and ``others``. (jaw, degrees
+        turned, None), or (None, 0, why not at the pick jaw)."""
+        base = self.fx.pick_jaw or (1.0, 0.0, 0.0)
+        first = None
+        for k in (0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6):
+            t = math.radians(15 * k)
+            jaw = (base[0] * math.cos(t) - base[1] * math.sin(t), base[0] * math.sin(t) + base[1] * math.cos(t), 0.0)
+            why = self._release_clear(d, p, jaw, release_z, others)
+            if why is None:
+                return jaw, abs(15.0 * k), None
+            first = first or why
+        return None, 0.0, first
+
+    def _release_clear(self, d: Drawer, p: Sequence[float], jaw: Vec, release_z: float,
+                       others: Sequence[Tuple[str, Vec, Vec]]) -> Optional[str]:
+        """Why not, if letting go at ``p`` with ``jaw`` puts an opened pad within ``pad_clear_m`` of ``d``'s
+        walls (the floor is the margin-free contact rule's) or of ``others``."""
+        chain, robot = self.calib.chain, self.calib.robot
+        walls = [w for w in self.fx.tray_parts(d, self.fx.open_m) if not w[0].endswith(" floor")]
+        boxes = walls + list(others)
+        if robot is not None and robot.hulls:
+            try:
+                q = kinematics.solve_ik(chain, self.fx.cabinet_look_pose_deg, (p[0], p[1], release_z), approach=DOWN,
+                                        jaw=jaw)
+            except IKError as exc:
+                return f"IK: {exc}"
+            hit = robot.hull_gaps(chain, q, boxes, self.s.pad_clear_m, lambda name, box: name not in robot.fingers,
+                                  jaw=self._jaw_at(self.calib.gripper_open))
+            return None if hit is None else f"{hit[0]} {hit[2] * 1000:.1f} mm from the {hit[1]}"
+        for side in (1.0, -1.0):  # without hulls: a finger the open reach out along the jaw
+            f = (p[0] + side * self._finger_reach * jaw[0], p[1] + side * self._finger_reach * jaw[1], release_z)
+            for entry in boxes:
+                name, lo, hi = entry[0], entry[1], entry[2]
+                rnd = float(entry[3]) if len(entry) > 3 else 0.0  # type: ignore[misc]
+                if _in_box(f, lo, hi, self.s.pad_clear_m + rnd):
+                    return f"a finger in the {name}"
+        return None
 
     def _put_blocked(self, d: Drawer, spot: Vec, via: Vec, shape: Shape, start: Sequence[float], least: float,
-                     release_z: float) -> Optional[str]:
+                     release_z: float, put_jaw: Optional[Vec] = None) -> Optional[str]:
         """Why the put at ``spot`` would be refused, planned as :meth:`_put_down` will make it after the grasp
-        on the table (:meth:`_put_yaw`): in at the carry height, down, let go, up, out; None if it passes."""
+        on the table (:meth:`_put_yaw`): in at the carry height, down, let go, up, out, the jaw ``put_jaw``
+        (default the calib's pick jaw) at the spot; None if it passes."""
         chain, c = self.calib.chain, self.calib
         carry = next((z for z in (least + 0.03, least + 0.015, least)
                       if self._reaches(spot, z) and self._reaches(via, z)), least)
-        jaw_mat = self._put_yaw(start, spot, shape, log=False)
+        jaw_mat = self._put_yaw(start, spot, shape, put_jaw, log=False)
         try:
             q_mat = kinematics.solve_ik(chain, c.look_pose_deg, (start[0], start[1], c.table_z + shape.grasp_height),
                                         approach=DOWN, jaw=jaw_mat)
             q_via = kinematics.solve_ik(chain, q_mat, (via[0], via[1], carry), approach=DOWN, hold=(6,))
-            # As _put_down: J6 held if the jaw lands within 10 deg of the pick jaw, else turned to it.
-            pick = self._jaw(d, spot)
+            # As _put_down: J6 held if the jaw lands within 10 deg of the put jaw, else turned to it.
+            pick = put_jaw if put_jaw is not None else self._jaw(d, spot)
             jaw, hold = None, (6,)
             if pick is not None:
                 there = kinematics.solve_ik(chain, q_via, (spot[0], spot[1], carry), approach=DOWN, hold=(6,))
@@ -1078,12 +1154,14 @@ class DrawerTask(PickPlace):
             self._plan_buffer = 0.0
         return None
 
-    def _put_yaw(self, start: Sequence[float], spot: Sequence[float], shape: Shape, log: bool = True) -> Optional[Vec]:
+    def _put_yaw(self, start: Sequence[float], spot: Sequence[float], shape: Shape, put_jaw: Optional[Vec] = None,
+                 log: bool = True) -> Optional[Vec]:
         """The jaw to grip with on the table so that, carried with J6 held (no wrist roll with the object in
-        hand), it arrives over ``spot`` along the calib's pick jaw: tried every 15 deg. None: the calib has no
-        pick jaw, or nothing lands within 10 deg (the put then turns, slowly, in front of the tray)."""
+        hand), it arrives over ``spot`` along ``put_jaw`` (default the calib's pick jaw): tried every 15 deg.
+        None: no such jaw, or nothing lands within 10 deg (the put then turns, slowly, in front of the tray)."""
         fx, chain = self.fx, self.calib.chain
-        if fx.pick_jaw is None:
+        target_jaw = put_jaw if put_jaw is not None else fx.pick_jaw
+        if target_jaw is None:
             return None
         grasp = (start[0], start[1], self.calib.table_z + shape.grasp_height)
         target = (spot[0], spot[1], spot[2] + shape.grasp_height + 0.03)
@@ -1097,7 +1175,7 @@ class DrawerTask(PickPlace):
             except IKError:
                 continue
             x = kinematics.column(chain.pose(there, "tcp"), 0)
-            err = math.degrees(math.acos(min(1.0, abs(kinematics.dot(x, fx.pick_jaw)))))
+            err = math.degrees(math.acos(min(1.0, abs(kinematics.dot(x, target_jaw)))))
             if err < best[0]:
                 best = (err, j)
         if log:
@@ -1283,6 +1361,8 @@ class DrawerTask(PickPlace):
         near: Any = "all" if at_handle else ({"table"} if table else set())
         if at_handle and hulls:
             near = {f"handle of {skip}"}  # the pads pinch that handle; the hulls keep 2 mm off the rest
+        # The one thing the pads may touch: the handle they grip (without hulls, anything at a handle).
+        pinched: Any = (near if near == "all" else set(near)) if at_handle else set()
         if self.calib.robot is not None:
             scene = [("table", (-9.0, -9.0, -9.0), (9.0, 9.0, self.calib.table_z)), ("cabinet", fx.box_min, fx.box_max)]
             scene += [(f"handle of {d_id}", k_lo, k_hi) for d_id, k_lo, k_hi in knobs]
@@ -1296,7 +1376,7 @@ class DrawerTask(PickPlace):
                 near = set(near) | {released}
         for q in collision.densify(path, self.s.check_step_deg):
             if not points:
-                why = self._robot_clear(q, scene, near, grasping, jaw, objects) if scene else None
+                why = self._robot_clear(q, scene, near, grasping, jaw, objects, pinched) if scene else None
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
                 continue
@@ -1318,7 +1398,7 @@ class DrawerTask(PickPlace):
                     if _in_box(pt, k_lo, k_hi, m):
                         return f"a finger at {_r(pt, 3)} on the handle of {d_id}"
             if scene:
-                why = self._robot_clear(q, scene, near, grasping, jaw, objects)
+                why = self._robot_clear(q, scene, near, grasping, jaw, objects, pinched)
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
         return None
@@ -1341,9 +1421,10 @@ class DrawerTask(PickPlace):
 
     def _known_boxes(self, openings: Dict[str, float], moving: Optional[str] = None
                      ) -> List[Tuple[str, Vec, Vec]]:
-        """Each known object as a box: its width square (a cylinder's or cone's corners too), from its
-        support to its top; one in a drawer goes where that drawer is in ``openings``, and one in the drawer
-        ``moving`` with the hand is left out (it goes with it)."""
+        """Each known object as an upright cylinder of its catalogue radius (a cube's half diagonal), from
+        its support to its top: (name, axis bottom, axis top, radius). One in a drawer goes where that drawer
+        is in ``openings``, and one in the drawer ``moving`` with the hand is left out (it goes with it). An
+        axis-aligned square was too coarse: its corners met the opened pads beside a cube (D0 v3.3)."""
         a = self.fx.pull_axis
         out = []
         for name, x, y, z, shape, d_id, opening0 in self._known:
@@ -1352,8 +1433,7 @@ class DrawerTask(PickPlace):
                     continue
                 shift = openings.get(d_id, self.opening[d_id]) - opening0
                 x, y = x + shift * a[0], y + shift * a[1]
-            h = shape.width / 2
-            out.append((name, (x - h, y - h, z), (x + h, y + h, z + shape.height)))
+            out.append((name, (x, y, z), (x, y, z + shape.height), shape.width / 2))
         return out  # type: ignore[return-value]
 
     def _guard_path(self, path: Sequence[Sequence[float]], moving: Optional[str] = None,

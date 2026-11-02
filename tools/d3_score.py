@@ -11,6 +11,9 @@ Pass, from the sim's truth before and after the run:
   after D3 v3.2 s502_e: a taught close tipped the cone just handed over). A sphere has no up and is
   not held to it (its tilt is printed);
 - every other object in the drawer it started in;
+- a run whose meta says ``"expect": "refusal"`` (an infeasible command, leader 18:5x: s461) passes as a
+  clean refusal instead: the brain's result ok=false with "no room", the object still upright in the
+  handover zone, at rest, every drawer shut, nothing else moved;
 - with ``--audit`` (sim-scene's ``collision_audit.py --out`` JSON, any number of them): zero colliding
   segments for the run, the arm against itself and the scene (BOARD 2026-11-02). A run the audits do
   not cover fails.
@@ -63,10 +66,12 @@ def score(d: Path, audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     drawer = meta.get("drawer") or ""
     oid = _moved(before, after, kind, drawer)
     o = after["objects"].get(oid) if oid else None
-    if kind in ("find", "take"):
-        placed = bool(o and o["in_handover"])
+    refusal = meta.get("expect") == "refusal"
+    if kind in ("find", "take") or refusal:
+        placed = bool(o and o["in_handover"])  # a refused put leaves it on the mat
     else:
         placed = bool(o and o["in_drawer"] == drawer)
+    refused = result.get("ok") is False and "no room" in str(result.get("why"))
     at_rest = bool(o and o["speed_mps"] < REST_MPS)
     tilt = tilt_deg(o["quat_wxyz"]) if o and o.get("quat_wxyz") else None
     upright = bool(o) and (o["shape"] == "sphere" or (tilt is not None and tilt < UPRIGHT_DEG))
@@ -81,7 +86,9 @@ def score(d: Path, audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     clean = audit is None or collided == 0
     return {
         "run": d.name, "kind": kind, "seed": meta["seed"], "drawer": drawer or None,
-        "pass": placed and at_rest and upright and not open_after and not strays and clean,
+        "pass": placed and at_rest and upright and not open_after and not strays and clean
+        and (refused if refusal else True),
+        "expect": "refusal" if refusal else "done", "refused": refused,
         "collision_segments": collided, "audit_row": None if audit is None else audit.get(d.name),
         "object": oid, "object_after": o, "placed": placed, "at_rest": at_rest, "upright": upright,
         "tilt_deg": None if tilt is None else round(tilt, 1),
@@ -117,7 +124,8 @@ def main() -> None:
             continue
         r = rows[-1]
         o = r["object_after"] or {}
-        print(f"{r['run']}: {'PASS' if r['pass'] else 'FAIL'} {r['object']} -> in_drawer={o.get('in_drawer')} "
+        print(f"{r['run']}: {'PASS' if r['pass'] else 'FAIL'}{' (refusal check)' if r['expect'] == 'refusal' else ''} "
+              f"{r['object']} -> in_drawer={o.get('in_drawer')} "
               f"in_handover={o.get('in_handover')} v={o.get('speed_mps')} tilt={r['tilt_deg']} deg"
               f"{'' if r['upright'] else ' NOT UPRIGHT'} | max open {r['max_open_m']:.4f} m, "
               f"strays {r['strays'] or 'none'} | brain_ok={r['brain_ok']} opened {r['drawers_opened']} "

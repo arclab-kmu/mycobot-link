@@ -154,6 +154,7 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
                                      and any(m in str(e.get("why")) for m in marks)],
                        guard_refused=any(m in str(result.get("why")) for m in marks))
             others_moved = [k for k in case.get("others", {}) if world.moved(k)]
+            rec["world_faults"] = world.faults[:20]
             rec.update(ok=result.get("ok"), why=result.get("why"), object_where_wanted=where_ok,
                        all_shut=world.all_shut(), others_moved=others_moved, seconds=round(time.monotonic() - t0, 1),
                        taught_checks=[e["why"] for e in ev if e["event"] == "taught_check"],
@@ -164,9 +165,12 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
             fake_cam.close()
             arm.close()
     why = rec.get("why") or ""
-    if rec.get("ok") and rec["object_where_wanted"] and rec["all_shut"] and not rec.get("others_moved"):
+    if rec.get("world_faults"):
+        rec["outcome"] = "fault"  # the sim would tip or touch: worse than a refusal (leader 18:5x)
+    elif rec.get("ok") and rec["object_where_wanted"] and rec["all_shut"] and not rec.get("others_moved"):
         rec["outcome"] = "planned"
-    elif any(w in why for w in ("PathBlocked", "no clear way", "would put", "IK", "out of reach", "no grasp")):
+    elif any(w in why for w in ("PathBlocked", "no clear way", "would put", "IK", "out of reach", "no grasp",
+                                "no room")):
         rec["outcome"] = "refused"
     else:
         rec["outcome"] = "other"
@@ -200,7 +204,7 @@ def main() -> None:
                   f"{'' if r['outcome'] == 'planned' else (r.get('why') or '')[:200]}", flush=True)
     rows.sort(key=lambda r: r["case"])
     (args.out / "d0_brain.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False))
-    counts = {k: sum(1 for r in rows if r["outcome"] == k) for k in ("planned", "refused", "other")}
+    counts = {k: sum(1 for r in rows if r["outcome"] == k) for k in ("planned", "refused", "fault", "other")}
     print(json.dumps(counts))
 
 

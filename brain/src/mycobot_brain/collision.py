@@ -103,8 +103,9 @@ class RobotBody:
                   boxes: Sequence[Tuple[str, Sequence[float], Sequence[float]]], margin: float,
                   skip: Callable[[str, str], bool], jaw: Optional[float] = None) -> Optional[Tuple[str, str, float]]:
         """The first moving collider whose hull at ``q_deg`` (pads with the jaw ``jaw`` open, see
-        :meth:`Hull.at`) comes closer than ``margin`` to one of ``boxes`` (name, lo, hi) that
-        ``skip(collider, box)`` does not excuse: (collider, box, gap); None if none."""
+        :meth:`Hull.at`) comes closer than ``margin`` to one of ``boxes`` (name, lo, hi[, round]: a box,
+        grown sideways by a horizontal disk of radius ``round`` - lo-hi a vertical line and it is an
+        upright cylinder) that ``skip(collider, box)`` does not excuse: (collider, box, gap); None if none."""
         frames = chain.frames(q_deg)
         for h in self.hulls:
             if h.name in self.still:
@@ -114,13 +115,15 @@ class RobotBody:
             verts, center, radius = h.at(jaw)
             c = apply(t, center)
             pts: Optional[List[Vec]] = None
-            for box, lo, hi in boxes:
-                if skip(h.name, box) or _point_box(c, lo, hi) - radius >= margin:
+            for entry in boxes:
+                box, lo, hi = entry[0], entry[1], entry[2]
+                rnd = float(entry[3]) if len(entry) > 3 else 0.0  # type: ignore[misc]
+                if skip(h.name, box) or _point_box(c, lo, hi) - rnd - radius >= margin:
                     continue
                 if pts is None:
                     pts = [(r0[0] * x + r0[1] * y + r0[2] * z + r0[3], r1[0] * x + r1[1] * y + r1[2] * z + r1[3],
                             r2[0] * x + r2[1] * y + r2[2] * z + r2[3]) for x, y, z in verts]
-                gap = hull_box_distance(pts, lo, hi, within=margin)
+                gap = hull_box_distance(pts, lo, hi, within=margin, round_m=rnd)
                 if gap < margin:
                     return h.name, box, gap
         return None
@@ -314,12 +317,15 @@ def _closest_simplex(s: List[Vec]) -> Tuple[Vec, List[Vec]]:
 
 
 def hull_box_distance(points: Sequence[Vec], lo: Sequence[float], hi: Sequence[float],
-                      within: float = math.inf) -> float:
-    """Distance from the convex hull of ``points`` to the axis-aligned box lo-hi (0 if they meet), by GJK
-    on their Minkowski difference. Anything farther than ``within`` may come back as any value above it."""
+                      within: float = math.inf, round_m: float = 0.0) -> float:
+    """Distance from the convex hull of ``points`` to the axis-aligned box lo-hi grown sideways by a
+    horizontal disk of radius ``round_m`` (an upright cylinder, for lo-hi a vertical line; 0 if they meet),
+    by GJK on their Minkowski difference. Anything farther than ``within`` may come back as any value
+    above it."""
     mn = [min(p[i] for p in points) for i in range(3)]
     mx = [max(p[i] for p in points) for i in range(3)]
-    gap = math.sqrt(sum(max(lo[i] - mx[i], 0.0, mn[i] - hi[i]) ** 2 for i in range(3)))
+    grow = (round_m, round_m, 0.0)
+    gap = math.sqrt(sum(max(lo[i] - grow[i] - mx[i], 0.0, mn[i] - hi[i] - grow[i]) ** 2 for i in range(3)))
     if gap >= within:
         return gap
 
@@ -329,8 +335,10 @@ def hull_box_distance(points: Sequence[Vec], lo: Sequence[float], hi: Sequence[f
             v = p[0] * d[0] + p[1] * d[1] + p[2] * d[2]
             if v > bd:
                 best, bd = p, v
-        # minus the box's support in -d
-        return (best[0] - (lo[0] if d[0] > 0 else hi[0]), best[1] - (lo[1] if d[1] > 0 else hi[1]),
+        # minus the box's (and the disk's) support in -d
+        h = math.hypot(d[0], d[1])
+        dx, dy = (round_m * d[0] / h, round_m * d[1] / h) if round_m and h > 1e-12 else (0.0, 0.0)
+        return (best[0] - (lo[0] if d[0] > 0 else hi[0]) + dx, best[1] - (lo[1] if d[1] > 0 else hi[1]) + dy,
                 best[2] - (lo[2] if d[2] > 0 else hi[2]))
 
     c = [(lo[i] + hi[i]) / 2 - (mn[i] + mx[i]) / 2 for i in range(3)]
