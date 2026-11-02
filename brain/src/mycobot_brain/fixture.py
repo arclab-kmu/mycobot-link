@@ -88,6 +88,9 @@ class Drawer:
     panel_z: Optional[Tuple[float, float]] = None
     #: the calib's grips over the pull, in order; empty: one grip from the cabinet-wide keys
     stages: Tuple[HandleStage, ...] = ()
+    #: False: the calib says no plan opens it (sim-scene 13:10: the bottom row with the wrist kept out of
+    #: the base); never opened, never offered to the VLM
+    usable: bool = True
 
     @property
     def knob_closed(self) -> Vec:
@@ -405,6 +408,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
                 wall_h=None if wall_h is None else float(wall_h),
                 panel_z=_vec(row["front_panel_z_m"], 2) if row.get("front_panel_z_m") else None,  # type: ignore[arg-type]
                 stages=tuple(_stage(row["id"], k, st, grasp) for k, st in enumerate(row.get("handle_stages") or ())),
+                usable=bool(row.get("usable", not row.get("disabled", False))),
             )
             if dr.id != f"r{dr.row}c{dr.col}":
                 raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")

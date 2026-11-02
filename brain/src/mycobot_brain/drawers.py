@@ -152,6 +152,9 @@ class DrawerTask(PickPlace):
         # A drawer the arm cannot pull all the way is not offered to the VLM at all.
         reachable = []
         for d in sorted(self.fx.drawers):
+            if not self.fx.drawers[d].usable:
+                self.log.event("unreachable", drawer=d, why="not in use (calib)")
+                continue
             try:
                 self._handle_plan(self.fx.drawers[d])
                 reachable.append(d)
@@ -181,6 +184,8 @@ class DrawerTask(PickPlace):
 
     def _take(self, cmd: Dict[str, Any], desc: str) -> Dict[str, Any]:
         d = self.fx.drawer(cmd["drawer"])
+        if not d.usable:
+            return {"ok": False, "why": f"{d.id} is not in use (calib): no plan opens it"}
         look = self._open_and_look(d, desc)
         target = look["target"]
         if target is None and desc == "any object" and look["objects"]:
@@ -195,6 +200,8 @@ class DrawerTask(PickPlace):
     def _put(self, cmd: Dict[str, Any], desc: str) -> Dict[str, Any]:
         c, fx = self.calib, self.fx
         shape = self._shape(cmd["shape"])
+        if not fx.drawer(cmd["drawer"]).usable:
+            return {"ok": False, "why": f"{cmd['drawer']} is not in use (calib): no plan opens it"}
         # Find it on the table first: no point opening a drawer for something that is not there.
         self._phase("table look")
         self._goto(c.look_pose_deg, "table look", floor=None)

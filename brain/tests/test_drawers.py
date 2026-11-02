@@ -5,7 +5,7 @@ import cabinet_scene as cs
 import pytest
 from test_pickplace import START, camera, sent, teleporting  # noqa: F401 (fixtures)
 
-from mycobot_brain import drawer_vlm, drawers, kinematics, pickplace
+from mycobot_brain import calib, drawer_vlm, drawers, kinematics, pickplace
 
 FAST = dict(settle=0.02, gripper_wait=0.02, arrive_timeout=3.0)
 FIND = "노란색 원뿔 찾아서 꺼내 줘"
@@ -351,3 +351,21 @@ def test_a_two_stage_handle_pulls_halfway_from_the_side_then_from_above(link, ca
                      ("close r1c1 (2/2): to handle", -1.0), ("close r1c1 (1/2): to handle", 0.0)]
     pulls = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "open r1c1 (2/2)"]
     assert pulls[-1]["tcp_xyz"][0] == pytest.approx(0.236 - 0.1, abs=0.002)  # the knob, fully out
+
+
+def test_a_drawer_the_calib_takes_out_of_use_is_never_opened(link, camera, teleporting, tmp_path, monkeypatch):
+    """sim-scene 13:10: with the arm kept out of the base, no plan opens the bottom row; the calib can mark
+    a drawer ``usable: false``, and the brain neither offers it to the VLM nor touches its handle."""
+    d = cs.sim_like_dict()
+    for row in d["cabinet"]["drawers"]:
+        row["usable"] = row["row"] != 0
+    monkeypatch.setattr(cs, "load", lambda: calib.from_dict(d))
+    cone = dict(SIM_OBJECTS["yellow_cone"], drawer="r2c1", xy=[0.289, 0.0])
+    result, world, vlm = run(link, camera, teleporting, tmp_path, objects={"yellow_cone": cone},
+                             order=["r0c0", "r0c1", "r2c1"])
+    assert result["ok"] is True and result["drawers_opened"] == ["r2c1"], result
+    out = {e["drawer"] for e in events(tmp_path) if e["event"] == "unreachable"}
+    assert out == {"r0c0", "r0c1", "r0c2"}
+    result, _, _ = run(link, camera, teleporting, tmp_path / "take", instruction="왼쪽 아래 서랍에 있는 물건을 꺼내 줘",
+                       objects={"yellow_cone": cone})
+    assert result["ok"] is False and "r0c0 is not in use" in result["why"] and result["drawers_opened"] == []
