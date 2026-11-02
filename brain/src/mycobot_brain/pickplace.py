@@ -132,6 +132,7 @@ class PickPlace:
         self._vlm_n = 0
         self._seq: Optional[int] = None
         self._jaw_open: Optional[float] = None  # how far open the jaw was last commanded; None: not yet
+        self._trail: Optional[List[List[float]]] = None  # waypoints sent since a mark, while one is kept
 
     # -- the sequence --------------------------------------------------------
 
@@ -485,6 +486,8 @@ class PickPlace:
         self._send(path, phase, speed or self.s.slow_speed)
 
     def _send(self, path: Sequence[Sequence[float]], phase: str, speed: int) -> None:
+        if self._trail is not None:
+            self._trail.extend(list(q) for q in path)
         for i, q in enumerate(path, 1):
             last = i == len(path)
             self.link.move_joints(q, speed)

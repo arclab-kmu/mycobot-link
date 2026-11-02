@@ -374,3 +374,23 @@ def test_a_drawer_the_calib_takes_out_of_use_is_never_opened(link, camera, telep
     result, _, _ = run(link, camera, teleporting, tmp_path / "take", instruction="왼쪽 아래 서랍에 있는 물건을 꺼내 줘",
                        objects={"yellow_cone": cone})
     assert result["ok"] is False and "r0c0 is not in use" in result["why"] and result["drawers_opened"] == []
+
+
+def test_out_of_a_drawer_goes_back_down_the_way_up_to_the_held_check_first(link, camera, teleporting, tmp_path,
+                                                                           monkeypatch):
+    """D3 v3.2 run 1 (s502, f0f49be): leaving r0c0 from its top-down view (the held check's), over the
+    cabinet edge, the line out took a folding elbow branch and the joint move down came 0.7 mm from the
+    cabinet face. Now the arm first retraces the waypoints it went up by, then leaves at the lift height."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    objects = {"yellow_cone": dict(SIM_OBJECTS["yellow_cone"], drawer="r2c2", xy=[0.289, -0.0985])}
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r2c2"])
+    assert result["ok"] is True, result
+    ev = [e for e in events(tmp_path) if e["event"] == "move"]
+    phases = [e["phase"] for e in ev]
+    i_lift = max(i for i, p in enumerate(phases) if p == "lift")
+    up = [e["angles_deg"] for e in ev[i_lift + 1:] if e["phase"] in ("lift: to the look", "look: held")]
+    down = [e["angles_deg"] for e in ev if e["phase"] == "out of r2c2: back to the lift"]
+    assert up and down == list(reversed([ev[i_lift]["angles_deg"]] + up[:-1]))
+    first_out = phases.index("out of r2c2")
+    assert phases.index("out of r2c2: back to the lift") < first_out
+    assert world.in_handover("yellow_cone") and world.all_shut()

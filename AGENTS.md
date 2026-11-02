@@ -99,7 +99,8 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   record → `drawer --execute` → truth after) and `tools/d3_score.py`. Truth is
   read only by these. `tools/d3_collision_replay.py`: a run's commanded path
   through the brain's capsule check (sim-scene's hull audit is the one that
-  scores).
+  scores). `brain/tests/d0_brain.py`: the brain-side D0 - every drawer x slot x
+  shape, take and put, planned against the fake arm/camera/VLM, no motion.
 
 ## Relation to other repos
 

@@ -101,6 +101,8 @@ class DrawerTask(PickPlace):
         #: what the fingers may come close to in the moves now being made (see :meth:`_near`).
         self._ctx: Dict[str, Any] = {}
         self._lifted: Optional[List[float]] = None  # the arm after the last lift, holding the object
+        #: the waypoints from the lift up to the held check's view, to go back down the same way
+        self._back: Optional[List[List[float]]] = None
         #: sim-scene's verified routes between the views (calib v3.2), played instead of planning
         self._routes: List[Tuple[str, TaughtLeg]] = [(f"{d.id} {name}", leg) for d in self.fx.drawers.values()
                                                      if d.taught for name, leg in d.taught.routes.items()]
@@ -534,9 +536,11 @@ class DrawerTask(PickPlace):
         here = self._measured()
         start, tol = (leg.start, 3.0) if leg.start is not None else (leg.q[0], 5.0)
         if max(abs(a - b) for a, b in zip(here, start)) > tol:
-            # Not low over the table, where an object may stand (the handover mat).
+            # Not low over the table, where an object may stand (the handover mat). Taught routes count: a
+            # close after a put starts from the tilted view, and v3.2's way from there to the cabinet look
+            # is round by the top-down view (D3 v3.2 D0, put r1c2).
             self._goto(list(start), f"{phase}: to the taught start", floor=self.calib.table_z + self.s.leave_mat_m
-                       if first else None, taught=False)
+                       if first else None, end_tol=tol - 0.5)
             here = self._measured()
         path = [list(q) for q in leg.q]
         why = self._path_clear([here] + path, points=False, **self._ctx)
@@ -544,9 +548,10 @@ class DrawerTask(PickPlace):
             self.log.event("taught_check", phase=phase, why=why)
         self._send(path, phase, leg.speed or speed or self.s.speed)
 
-    def _taught_route(self, here: Sequence[float], goal: Sequence[float]) -> Optional[List[Tuple[str, TaughtLeg]]]:
-        """Taught routes, end to end (up to 3), from where the arm is (3 deg) to ``goal`` (0.5 deg): v3.2's
-        routes go one way round, cabinet look -> tilted -> top-down -> cabinet look."""
+    def _taught_route(self, here: Sequence[float], goal: Sequence[float],
+                      end_tol: float = 0.5) -> Optional[List[Tuple[str, TaughtLeg]]]:
+        """Taught routes, end to end (up to 3), from where the arm is (3 deg) to ``goal`` (``end_tol``):
+        v3.2's routes go one way round, cabinet look -> tilted -> top-down -> cabinet look."""
         def near(a: Sequence[float], b: Sequence[float], tol: float) -> bool:
             return max(abs(x - y) for x, y in zip(a, b)) <= tol
 
@@ -558,7 +563,7 @@ class DrawerTask(PickPlace):
                                                     if near(here, starts(r[1])[0], 3.0 + starts(r[1])[1] - 0.5)]
         for _ in range(3):
             for path in paths:
-                if near(goal, path[-1][1].q[-1], 0.5):
+                if near(goal, path[-1][1].q[-1], end_tol):
                     return path
             paths = [path + [r] for path in paths for r in self._routes
                      if r not in path and near(path[-1][1].q[-1], starts(r[1])[0], starts(r[1])[1])]
@@ -829,6 +834,7 @@ class DrawerTask(PickPlace):
                                            max(above[2], top + shape.grasp_height + 0.006)], approach, jaw)
             self._line((xyz[0], xyz[1], lift), "lift", approach, jaw)
             self._lifted = self._measured()
+            self._trail = [list(self._lifted)]  # the way up to the held check's view, to retrace
             self._phase("check held")
             if view is not None:
                 # Up to the view's height first, then turn: the way down in reverse (see pre-grasp).
@@ -843,6 +849,7 @@ class DrawerTask(PickPlace):
                 images = [("Before the grasp:", before)]
             else:
                 question, images = grounding.held_question(desc), []
+            self._back, self._trail = self._trail, None
             check = self._check(question, images, "held")
             if not check["ok"]:
                 self._gripper(c.gripper_open, "open")
@@ -860,7 +867,7 @@ class DrawerTask(PickPlace):
         s, c = self.s, self.calib
         release_z = surface_z + shape.grasp_height + clear
         least = max(release_z, (wall_top or surface_z) + shape.grasp_height + s.wall_clear_m)
-        via = None if drawer is None else self._front_of(drawer, xyz)
+        via = None if drawer is None else self._front_of(drawer, xyz, shape.width)
         carry = self._reachable_z([xyz] + ([via] if via else []), [least + 0.03, least + 0.015, least], DOWN, None)
         self._phase(f"carry: {where}")
         self._rise(carry, f"raise: {where}")
@@ -869,16 +876,22 @@ class DrawerTask(PickPlace):
             self._carry((via[0], via[1], carry), f"carry: {where}: in front", floor)
         else:
             self._carry((xyz[0], xyz[1], carry), f"carry: {where}", floor)
+        # Into a drawer with the calib's pick jaw (sim-scene: along x, so the pads and the gripper body stay
+        # between the tray's front and back walls), turned to in front of the tray; the yaw left over from
+        # the table pick put the gripper body by the handles above (D3 v3.2 D0, put r0c0).
+        jaw = None if drawer is None else self._jaw(drawer, xyz)
         with self._near(**self._grasping(drawer)):
             if via is not None:
-                self._line((xyz[0], xyz[1], carry), f"carry: {where}", DOWN)
+                if jaw is not None:
+                    self._line((via[0], via[1], carry), f"carry: {where}: turn", DOWN, jaw)
+                self._line((xyz[0], xyz[1], carry), f"carry: {where}", DOWN, jaw)
             self._phase(f"lower: {where}")
-            self._line((xyz[0], xyz[1], release_z), f"lower: {where}", DOWN)
+            self._line((xyz[0], xyz[1], release_z), f"lower: {where}", DOWN, jaw)
             self._gripper(c.gripper_open, "open")
             self._phase("retreat")
-            self._line((xyz[0], xyz[1], carry), "retreat", DOWN)
+            self._line((xyz[0], xyz[1], carry), "retreat", DOWN, jaw)
             if via is not None:
-                self._line((via[0], via[1], carry), "retreat: out of the drawer", DOWN)
+                self._line((via[0], via[1], carry), "retreat: out of the drawer", DOWN, jaw)
 
     def _carry(self, goal: Vec, phase: str, floor: float) -> None:
         """Holding something, to ``goal``: a joint move where it is clear, else a slow straight line, else
@@ -908,13 +921,36 @@ class DrawerTask(PickPlace):
         self._goto(q, phase, floor=floor, speed=self.s.slow_speed)
 
     def _leave_drawer(self, d: Drawer, shape: Shape) -> None:
-        """With an object out of ``d``: up until it clears the walls, then straight out past the front."""
+        """With an object out of ``d``: back down to where the grasp lifted, the way the arm came up to the
+        held check's view; up until it clears the walls; then straight out past the front.
+
+        D3 v3.2 run 1 (s502, f0f49be): from r0c0's top-down view, hanging over the cabinet edge, the
+        straight line out took an elbow branch that folded the forearm onto the gripper, and the joint
+        move down to the line's height put the gripper 0.7 mm from the cabinet face. The way up was
+        checked on the way up."""
+        back, self._back = self._back, None
+        if back and len(back) > 1 and max(abs(a - b) for a, b in zip(self._measured(), back[-1])) <= 3.0:
+            path = [list(q) for q in reversed(back[:-1])]
+            with self._near(grasp_in=d.id):
+                self._check_path([self._measured()] + path, f"out of {d.id}: back to the lift")
+                self._send(path, f"out of {d.id}: back to the lift", self.s.slow_speed)
         top = self._wall_top(d) + shape.grasp_height
         here = kinematics.position(self.calib.chain.pose(self._measured(), "tcp"))
-        via = self._front_of(d, here)
+        via = self._front_of(d, here, shape.width)
         z = self._reachable_z([here, via], [top + self.s.wall_clear_m, top + 0.006], DOWN, None)
         self._phase(f"out of {d.id}")
         with self._near(grasp_in=d.id):
+            # Low in front of a bottom-row tray the line out folds the arm against itself (r0c1: joint3 on
+            # joint5, D3 v3.2 D0): higher, if the arm reaches, before giving up on the line.
+            for dz in (0.03, 0.06, 0.09):
+                if self._line_clear((via[0], via[1], z)):
+                    break
+                try:
+                    z_up = self._reachable_z([here, via], [z + dz], DOWN, None)
+                except PickPlaceError:
+                    break
+                self.log.event("skip", why=f"out of {d.id}: no clear line at z={z:.3f}; {z_up:.3f}")
+                z = z_up
             self._rise(z, f"out of {d.id}: up")
             # From higher up (the held check's view) the line falls to z as it goes, never below it.
             try:
@@ -928,15 +964,35 @@ class DrawerTask(PickPlace):
                 self._goto(up, f"out of {d.id}: over the floor", floor=top + 0.006)
                 self._line((via[0], via[1], z), f"out of {d.id}", DOWN)
 
-    def _front_of(self, d: Drawer, p: Sequence[float]) -> Vec:
-        """On the line through ``p`` along the pull, clear in front of the opened tray: past its inner
-        front wall by the wall (6 mm), the handle sticking out of it, an open finger and 1 cm. Short of
-        the handle, the way down to the handover mat ran a finger over r2c0's open handle."""
+    def _line_clear(self, goal: Sequence[float]) -> bool:
+        """Whether straight up from here to ``goal``'s height, then the line to ``goal`` (DOWN, jaw free),
+        passes the checker as the moves would, in the current context."""
+        chain, here = self.calib.chain, self._measured()
+        p = kinematics.position(chain.pose(here, "tcp"))
+        try:
+            up = kinematics.line_path(chain, here, (p[0], p[1], max(p[2], goal[2])), step_m=self.s.line_step_m,
+                                      max_step=self.s.max_step, approach=DOWN) if goal[2] > p[2] + 0.005 else []
+            start = up[-1] if up else here
+            out = kinematics.line_path(chain, start, goal, step_m=self.s.line_step_m, max_step=self.s.max_step,
+                                       approach=DOWN)
+        except IKError:
+            return False
+        return self._path_clear([here] + up + out, points=False, **self._ctx) is None
+
+    def _front_of(self, d: Drawer, p: Sequence[float], width: float = 0.0) -> Vec:
+        """On the line through ``p`` along the pull, clear in front of the opened tray for something
+        ``width`` wide held there: past its inner front wall by the wall (6 mm), the handle sticking out
+        of it, and 1 cm, plus half the object; without the arm's hulls in the calib, an open finger
+        instead (short of the handle, the way down to the handover mat ran a finger over r2c0's open
+        handle). With the hulls the brain checks the fingers itself, and the finger's reach put this
+        point for r0c0 by the base, where the line there folded the arm (D3 v3.2 D0, take r0c0)."""
         fx = self.fx
         a, _ = fx.axes()
         c = fx.interior_center(d, fx.open_m)
         along, _ = fx.extent(d)
-        clear = max(0.045, 0.006 + fx.handle_protrusion_m + self._finger_reach + 0.01)
+        hulls = self.calib.robot is not None and bool(self.calib.robot.hulls)
+        reach = width / 2 if hulls else self._finger_reach
+        clear = max(0.045, 0.006 + fx.handle_protrusion_m + reach + 0.01)
         s = (c[0] - p[0]) * a[0] + (c[1] - p[1]) * a[1] + along / 2 + clear
         return (p[0] + s * a[0], p[1] + s * a[1], p[2] if len(p) > 2 else 0.0)
 
@@ -1105,11 +1161,11 @@ class DrawerTask(PickPlace):
         return None, "", straight
 
     def _goto(self, goal: Sequence[float], phase: str, floor: Optional[float], speed: Optional[int] = None,
-              taught: bool = True) -> None:
+              taught: bool = True, end_tol: float = 0.5) -> None:
         """As pick-place's, but along a taught route where there is one (:meth:`_taught_route`), else round
         what is in the way (:meth:`_route`), and the floor is no higher than where the path starts."""
         here = self._measured()
-        route = self._taught_route(here, goal) if taught else None
+        route = self._taught_route(here, goal, end_tol) if taught else None
         if route is not None:
             for name, leg in route:
                 self.log.event("taught", phase=phase, route=name)
@@ -1120,6 +1176,20 @@ class DrawerTask(PickPlace):
             # floor for above it (wall top + 2 cm): the path may not go lower than it starts (D3 s451).
             floor = min(floor, kinematics.position(self.calib.chain.pose(here, "tcp"))[2])
         vias, how, why = self._route(here, goal, floor, **self._ctx)
+        look = self.fx.cabinet_look_pose_deg
+        if vias is None and taught and look:
+            # Off a drawer's view the planned moves all start with a joint move the checker refuses (r0c2's
+            # and r1c2's tilted views: forearm and camera); v3.2 teaches the way back to the cabinet look
+            # (D3 v3.2 D0, put r0c2): take it, and plan from there.
+            back = self._taught_route(here, look)
+            if back is not None:
+                v2, how2, _ = self._route(look, goal, floor, **self._ctx)
+                if v2 is not None:
+                    self.log.event("detour", phase=phase, how=f"taught back to the cabinet look, then {how2}", why=why)
+                    for name, leg in back:
+                        self.log.event("taught", phase=phase, route=name)
+                        self._play(leg, f"{phase}: detour", speed)
+                    here, vias = self._measured(), v2
         if vias is None:
             raise PathBlocked(f"{phase}: no clear way: straight, the path would put the {why}")
         if vias:
