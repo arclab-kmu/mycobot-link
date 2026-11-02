@@ -1,0 +1,224 @@
+"""The arm's own links as capsules (calib v3 ``robot_collision``), against each other and the scene.
+
+The capsules here are made up in the format on the BOARD (2026-11-02): one or more capsules per link in
+the chain's frames, and the link pairs to check. sim-scene's numbers come with calib v3.
+"""
+
+import math
+
+import cabinet_scene as cs
+import pytest
+from test_pickplace import START, camera, sent, teleporting  # noqa: F401 (fixtures)
+
+from mycobot_brain import calib, collision, drawers, kinematics, pickplace
+
+# The demo (s510) pulling r0c1 open, as commanded by 2eb3e4c: the wrist camera was in the base.
+DEMO_R0C1_PULL = [-36.5, -68.2, -134.8, 23.0, 103.5, -135.0]
+
+
+def task_with_capsules(tmp_path, capsules=None):
+    c = cs.load_sim_like_with_capsules(capsules)
+    return drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
+
+
+# -- distances ---------------------------------------------------------------------
+
+
+def test_segment_distance():
+    d = collision.segment_distance
+    assert d((0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)) == pytest.approx(1.0)  # parallel
+    assert d((0, 0, 0), (1, 0, 0), (0.5, -1, 1), (0.5, 1, 1)) == pytest.approx(1.0)  # crossing, 1 apart
+    assert d((0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)) == pytest.approx(1.0)  # in line, end to end
+    assert d((0, 0, 0), (0, 0, 0), (0, 3, 4), (0, 3, 4)) == pytest.approx(5.0)  # two points
+    assert d((0, 0, 0), (1, 1, 1), (0, 1, 0), (1, 0, 1)) == pytest.approx(0.0, abs=1e-12)  # they cross
+
+
+def test_box_distance():
+    lo, hi = (0, 0, 0), (1, 1, 1)
+    d = collision.box_distance
+    assert d((-1, 0.5, 0.5), (2, 0.5, 0.5), lo, hi) == 0.0  # through it
+    assert d((-1, 0.5, 1.2), (2, 0.5, 1.2), lo, hi) == pytest.approx(0.2)  # over the top
+    # Past a corner on the diagonal: closest at the corner (1, 1, 0.5), sqrt(2) * 0.1 away.
+    assert d((1.2, 0.9, 0.5), (0.9, 1.2, 0.5), lo, hi) == pytest.approx(math.sqrt(0.02) / 2, abs=1e-6)
+    assert d((5, 5, 5), (6, 6, 6), lo, hi, within=0.1) > 0.1  # far away: any value over ``within``
+
+
+def test_paths_are_checked_every_2_deg_from_the_start():
+    path = collision.densify([[0] * 6, [10, 0, 0, 0, 0, -7], [10, 5, 0, 0, 0, -7]])
+    assert path[0] == [0] * 6 and path[-1] == [10, 5, 0, 0, 0, -7]
+    assert max(max(abs(a - b) for a, b in zip(p, q)) for p, q in zip(path, path[1:])) <= 2.0 + 1e-9
+    assert [10, 0, 0, 0, 0, -7] in path
+
+
+# -- the calib -----------------------------------------------------------------------
+
+
+def test_chain_frames_are_the_links_of_the_sim_urdf():
+    c = calib.from_dict(cs.SIM)
+    q = [12.0, -30.0, -60.0, 20.0, 15.0, 40.0]
+    f = c.chain.frames(q)
+    assert c.chain.links == ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint6_flange"]
+    for name, tool in (("tcp", "tcp"), ("camera", "camera"), ("joint6_flange", "flange")):
+        assert kinematics.position(f[name]) == pytest.approx(kinematics.position(c.chain.pose(q, tool)))
+    assert f["joint1"] == kinematics.identity()
+    assert kinematics.position(f["joint2"]) == pytest.approx([0, 0, 0.13156 + 0.026], abs=1e-9)
+    # The fixed frames from the flange to the camera and the TCP are there too.
+    assert kinematics.position(f["camera_link"]) == pytest.approx(kinematics.position(f["camera"]), abs=0.02)
+    assert c.chain.frame_depth("joint1") == 0 and c.chain.frame_depth("joint4") == 3
+    assert c.chain.frame_depth("tool_mount") == 6 == c.chain.frame_depth("tcp")
+
+
+def test_robot_collision_in_the_board_format():
+    c = cs.load_sim_like_with_capsules()
+    body = c.robot
+    assert len(body.capsules) == 7 and ("joint1", "camera_flange") in body.pairs
+    assert body.fingers == {"gripper_left3", "gripper_right3"}
+    assert body.still == {"joint1"}  # the base cannot move into anything
+
+
+def test_robot_collision_with_several_capsules_per_link_aliases_and_default_pairs():
+    caps = {
+        "capsules": {
+            "joint1": [{"frame": "joint1", "a_m": [0, -0.05, 0.05], "b_m": [0, 0.05, 0.05], "radius_m": 0.05},
+                       {"frame": "joint1", "segment_m": [[0, 0, 0.02], [0, 0, 0.1]], "radius_m": 0.04}],
+            "joint3": {"frame": "joint3", "p0_m": [-0.11, 0, 0.06], "p1_m": [0, 0, 0.06], "r_m": 0.035},
+            "joint2": {"frame": "joint2", "a_m": [0, 0, 0], "b_m": [0, 0, -0.03], "radius_m": 0.03},
+            "camera_flange": {"frame": "camera_mount", "a_m": [0.04, 0, 0.01], "b_m": [0, 0, 0.01],
+                              "radius_m": 0.02},
+        },
+        "fingers": [],
+    }
+    body = cs.load_sim_like_with_capsules(caps).robot
+    assert [c.name for c in body.capsules].count("joint1") == 2
+    # No pairs given: every two links two or more joints apart (joint1-joint2 and joint2-joint3 are not).
+    assert set(body.pairs) == {("joint1", "joint3"), ("joint1", "camera_flange"), ("joint3", "camera_flange"),
+                               ("joint2", "camera_flange")}
+    assert body.fingers == frozenset()
+
+
+@pytest.mark.parametrize("bad, words", [
+    ({"capsules": [{"name": "x", "frame": "elbow", "a_m": [0, 0, 0], "b_m": [0, 0, 0], "radius_m": 0.01}]},
+     "frame 'elbow'"),
+    ({"capsules": [{"name": "x", "frame": "joint3", "a_m": [0, 0, 0], "b_m": [0, 0, 0], "radius_m": 0.01}],
+      "pairs": [["x", "joint9"]]}, "no capsule named 'joint9'"),
+    ({"capsules": [{"name": "x", "frame": "joint3", "a_m": [0, 0, 0], "radius_m": 0.01}]}, "a_m and b_m"),
+])
+def test_a_robot_collision_the_brain_cannot_read_stops_the_load(bad, words):
+    with pytest.raises(calib.CalibError, match=words):
+        cs.load_sim_like_with_capsules(bad)
+
+
+# -- the checks ------------------------------------------------------------------------
+
+
+def test_the_demo_pull_of_r0c1_had_the_camera_in_the_base(tmp_path):
+    """BOARD 2026-11-02 08:40: Hojin saw the wrist camera pass through the base in demo s510; D3 checked
+    only the TCP, pads and camera against the cabinet."""
+    task = task_with_capsules(tmp_path)
+    c = task.calib
+    placed = {p.capsule.name: p for p in c.robot.place(c.chain, DEMO_R0C1_PULL)}
+    base, cam = placed["joint1"], placed["camera_flange"]
+    gap = collision.segment_distance(base.a, base.b, cam.a, cam.b) - base.capsule.radius - cam.capsule.radius
+    assert gap < -0.02  # 2 cm and more into the base
+    assert c.robot.self_hit(list(placed.values()), 0.005).startswith("joint1")
+    assert c.robot.self_hit(c.robot.place(c.chain, task.fx.cabinet_look_pose_deg), 0.005) is None
+    assert "camera_flange" in task._path_clear([task.fx.cabinet_look_pose_deg, DEMO_R0C1_PULL])
+
+
+def test_the_margin_is_5_mm(tmp_path):
+    task = task_with_capsules(tmp_path)
+    q = task.calib.look_pose_deg
+    gb = next(p for p in task.calib.robot.place(task.calib.chain, q) if p.capsule.name == "gripper_base")
+    end = min(gb.a, gb.b, key=lambda e: e[2])
+    low = end[2] - gb.capsule.radius
+    # A post right under the gripper body's lowest point, its top 6 mm and then 4 mm below it.
+    lo = (end[0] - 0.01, end[1] - 0.01, 0.0)
+    assert task._robot_clear(q, [("post", lo, (end[0] + 0.01, end[1] + 0.01, low - 0.006))], "all") is None
+    why = task._robot_clear(q, [("post", lo, (end[0] + 0.01, end[1] + 0.01, low - 0.004))], "all")
+    assert why == "gripper_base 4 mm from the post"
+
+
+def test_straight_lines_are_checked_and_the_pads_meet_the_table_only_at_a_grasp(tmp_path):
+    """Lines (descend, lift, pull) went unchecked in 2eb3e4c. The pads' capsules are coarser than the
+    pad-tip rule that holds them 1 mm over the table at a grasp, so there they may come closer."""
+    task = task_with_capsules(tmp_path)
+    c = task.calib
+    over = kinematics.solve_ik(c.chain, c.look_pose_deg, (0.10, 0.19, 0.08), approach=pickplace.DOWN)
+    sent = []
+    task._measured = lambda: list(over)
+    task._send = lambda path, phase, speed: sent.append(phase)
+    with pytest.raises(pickplace.PathBlocked, match="gripper_(left|right)3 .* from the table"):
+        task._line((0.10, 0.19, 0.019), "descend")
+    with task._near(table=True):
+        task._line((0.10, 0.19, 0.019), "descend")
+    assert sent == ["descend"]
+
+
+def test_a_move_that_would_pass_a_pad_over_the_base_goes_round(tmp_path):
+    """From r0c0's drawer look to r2c1's pre-grasp (both D3 s501 poses) the straight joint move passes the
+    right pad within 4 mm of the base; by the table look it is clear."""
+    task = task_with_capsules(tmp_path)
+    look_r0c0, pre_r2c1 = [95.5, -56.2, -22.8, -51.1, -41.9, 12.2], [-44.71, -34.09, -93.83, -51.92, 95.05, -135.14]
+    vias, how, why = task._route(look_r0c0, pre_r2c1, None)
+    assert why.startswith("joint1") and "gripper_" in why
+    assert vias and how != "straight"
+    assert task._path_clear([look_r0c0, *vias, pre_r2c1]) is None
+    sent = []
+    task._measured = lambda: list(look_r0c0)
+    task._send = lambda path, phase, speed: sent.append((phase, [round(a, 2) for a in path[-1]]))
+    task._goto(pre_r2c1, "open r2c1: pre-grasp", floor=None)
+    assert [p for p, _ in sent] == ["open r2c1: pre-grasp: detour"] * len(vias) + ["open r2c1: pre-grasp"]
+    assert sent[-1][1] == pytest.approx(pre_r2c1)
+    detour = [e for e in cs_events(tmp_path) if e["event"] == "detour"]
+    assert detour and detour[0]["how"] == how
+
+
+def test_a_move_into_the_base_has_no_way_round(tmp_path):
+    task = task_with_capsules(tmp_path)
+    vias, _, why = task._route(task.fx.cabinet_look_pose_deg, DEMO_R0C1_PULL, None)
+    assert vias is None and "camera_flange" in why
+    task._measured = lambda: list(task.fx.cabinet_look_pose_deg)
+    task._send = lambda path, phase, speed: pytest.fail("sent a blocked move")
+    with pytest.raises(pickplace.PathBlocked, match="no clear way"):
+        task._goto(DEMO_R0C1_PULL, "open r0c1", floor=None)
+
+
+def test_a_pulled_drawer_is_boxes_the_arm_keeps_off(tmp_path):
+    """r0c0 fully out, as in sim-scene's calib: interior x 0.153-0.225, y 0.045-0.117, front panel 8 mm."""
+    fx = cs.load_sim_like().fixture
+    parts = {name: (lo, hi) for name, lo, hi in fx.tray_parts(fx.drawers["r0c0"], 0.1)}
+    lo, hi = parts["r0c0 front"]
+    assert lo[0] == pytest.approx(0.145) and hi[0] == pytest.approx(0.153)
+    assert (lo[2], hi[2]) == pytest.approx((0.0185, 0.0535))
+    lo, hi = parts["r0c0 floor"]
+    assert (lo[0], hi[0]) == pytest.approx((0.153, 0.229)) and hi[2] == pytest.approx(0.023)
+    walls = sorted(((lo, hi) for name, lo, hi in fx.tray_parts(fx.drawers["r0c0"], 0.1) if "side wall" in name),
+                   key=lambda w: w[0][1])
+    assert walls[0][1][1] == pytest.approx(0.045) and walls[1][0][1] == pytest.approx(0.117)
+
+
+def cs_events(tmp_path):
+    import json
+    return [json.loads(line) for line in (tmp_path / "run" / "events.jsonl").read_text().splitlines()]
+
+
+def test_a_find_with_the_capsules_on_checks_every_move_and_still_hands_the_cone_over(
+        link, camera, teleporting, tmp_path, monkeypatch):
+    """The whole find (handle, look, grasp among the walls, handover on the table, push shut) with every
+    joint move and line checked every 2 deg against the made-up capsules."""
+    from test_drawers import SIM_OBJECTS, events, run
+    monkeypatch.setattr(cs, "load", cs.load_sim_like_with_capsules)
+    # r2c1 holds the cone: with these made-up capsules some other drawers have no way in within 5 mm
+    # (the gripper body by the closed handle above r1c0's tray, say); calib v3's numbers decide that.
+    cone = dict(SIM_OBJECTS["yellow_cone"], drawer="r2c1", xy=[0.289, 0.0])
+    objects = {"yellow_cone": cone, "yellow_cube": SIM_OBJECTS["yellow_cube"]}
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r2c2", "r2c1"])
+    assert result["ok"] is True, result
+    assert result["drawers_opened"] == ["r2c2", "r2c1"]
+    assert world.in_handover("yellow_cone") and world.all_shut() and not world.moved("yellow_cube")
+    # What was sent, replayed every 2 deg: no listed pair of links within the margin.
+    c = cs.load_sim_like_with_capsules()
+    path = [m["angles_deg"] for m in sent(teleporting, ("move_joints",))]
+    for q in collision.densify([START] + path):
+        assert c.robot.self_hit(c.robot.place(c.chain, q), 0.005) is None, q
+    assert all(e["event"] != "skip" or "no close look" not in e["why"] for e in events(tmp_path))

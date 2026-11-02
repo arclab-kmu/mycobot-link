@@ -7,11 +7,14 @@ Pass, from the sim's truth before and after the run:
   find, the yellow cone in the handover zone; take, one object that was in the
   named drawer, in the handover zone; put, the object that stood in the
   handover zone, in the named drawer;
-- every other object in the drawer it started in.
+- every other object in the drawer it started in;
+- with ``--audit`` (sim-scene's ``collision_audit.py --out`` JSON, any number of them): zero colliding
+  segments for the run, the arm against itself and the scene (BOARD 2026-11-02). A run the audits do
+  not cover fails.
 
 The brain's own ``result`` is printed beside it, not used.
 
-    python3 tools/d3_score.py [--runs /home/hkim/mycobot-sim/runs] [--glob 'd3_*']
+    python3 tools/d3_score.py [--runs /home/hkim/mycobot-sim/runs] [--glob 'd3_*'] [--audit audit.json]
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ def _moved(before: Dict[str, Any], after: Dict[str, Any], kind: str, drawer: str
     return left[0] if len(left) == 1 else None
 
 
-def score(d: Path) -> Dict[str, Any]:
+def score(d: Path, audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     meta = json.loads((d / "meta.json").read_text())
     before = json.loads((d / "truth_before.json").read_text())
     after = json.loads((d / "truth.json").read_text())
@@ -57,9 +60,15 @@ def score(d: Path) -> Dict[str, Any]:
     strays = [i for i, b in before["objects"].items()
               if i != oid and after["objects"][i]["in_drawer"] != b["in_drawer"]]
     latency = [e["latency_s"] for e in ev if e["event"] == "vlm_reply"]
+    collided: Optional[int] = None
+    if audit is not None:
+        row = audit.get(d.name)
+        collided = None if row is None else int(row["segments"])
+    clean = audit is None or collided == 0
     return {
         "run": d.name, "kind": kind, "seed": meta["seed"], "drawer": drawer or None,
-        "pass": placed and at_rest and not open_after and not strays,
+        "pass": placed and at_rest and not open_after and not strays and clean,
+        "collision_segments": collided, "audit_row": None if audit is None else audit.get(d.name),
         "object": oid, "object_after": o, "placed": placed, "at_rest": at_rest,
         "open_after": open_after, "max_open_m": max(v["open_m"] for v in after["drawers"].values()),
         "strays": {i: [before["objects"][i]["in_drawer"], after["objects"][i]["in_drawer"]] for i in strays},
@@ -74,13 +83,19 @@ def main() -> None:
     p.add_argument("--runs", type=Path, default=Path("/home/hkim/mycobot-sim/runs"))
     p.add_argument("--glob", default="d3_*")
     p.add_argument("--json", type=Path, help="also write the rows here")
+    p.add_argument("--audit", type=Path, action="append", help="sim-scene's collision audit JSON (repeatable)")
     args = p.parse_args()
+    audit: Optional[Dict[str, Any]] = None
+    if args.audit:
+        audit = {}
+        for a in args.audit:
+            audit.update(json.loads(a.read_text())["runs"])
     rows: List[Dict[str, Any]] = []
     # Run directories only: archived passes (d3_try*) sit beside them.
     runs = [x for x in args.runs.glob(args.glob) if x.is_dir() and x.name.split("_")[1:2] in (["put"], ["take"], ["find"])]
     for d in sorted(runs):
         try:
-            rows.append(score(d))
+            rows.append(score(d, audit))
         except (FileNotFoundError, json.JSONDecodeError, IndexError, KeyError) as exc:
             print(f"{d.name}: incomplete ({exc!r})")
             continue
@@ -89,7 +104,8 @@ def main() -> None:
         print(f"{r['run']}: {'PASS' if r['pass'] else 'FAIL'} {r['object']} -> in_drawer={o.get('in_drawer')} "
               f"in_handover={o.get('in_handover')} v={o.get('speed_mps')} | max open {r['max_open_m']:.4f} m, "
               f"strays {r['strays'] or 'none'} | brain_ok={r['brain_ok']} opened {r['drawers_opened']} "
-              f"{r['seconds']:.1f} s, {r['vlm_calls']} VLM calls")
+              f"{r['seconds']:.1f} s, {r['vlm_calls']} VLM calls"
+              + ("" if audit is None else f" | collision segments {r['collision_segments']}"))
     print(f"{sum(r['pass'] for r in rows)}/{len(rows)} pass")
     if args.json:
         args.json.write_text(json.dumps(rows, indent=2, ensure_ascii=False))

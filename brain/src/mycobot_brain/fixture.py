@@ -65,6 +65,8 @@ class Drawer:
     knob: Optional[Vec] = None
     #: tray wall height over the floor when the inner box's z is the clearance to the shelf above
     wall_h: Optional[float] = None
+    #: the drawer front's bottom and top
+    panel_z: Optional[Tuple[float, float]] = None
 
     @property
     def knob_closed(self) -> Vec:
@@ -123,6 +125,8 @@ class Fixture:
     handle_protrusion_m: float = 0.0
     #: a handle's protrusion, width and height (along the pull, across it, up)
     handle_size: Optional[Vec] = None
+    #: a drawer's outside, across the pull and along it (front panel to back wall)
+    drawer_outer: Optional[Tuple[float, float]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- where things are -------------------------------------------------------
@@ -166,6 +170,33 @@ class Fixture:
             c = self.knob(d, openings.get(d.id, 0.0))
             out.append((d.id, tuple(c[i] - half[i] for i in range(3)), tuple(c[i] + half[i] for i in range(3))))
         return out  # type: ignore[return-value]
+
+    def tray_parts(self, d: Drawer, opening: float) -> List[Tuple[str, Vec, Vec]]:
+        """The drawer's front panel, floor, side walls and back wall as boxes, ``opening`` m out, for the
+        arm's capsules to keep off (the part still in the cabinet is inside its body box anyway)."""
+        a, b = self.axes()
+        along, across = self.extent(d)
+        c = self.interior_center(d, opening)
+        s_c, t_c = dot(c, a), dot(c, b)
+        width, depth = self.drawer_outer or (across + 0.006, along + 0.012)
+        s_front = self.front + opening  # the panel's outer face
+        s_in, s_back_in, s_back = s_c + along / 2, s_c - along / 2, s_front - depth
+        hw, hw_in = width / 2, across / 2
+        floor, wall_top = d.floor_z, d.floor_z + (d.wall_h if d.wall_h is not None else d.interior_size[2])
+        bottom, top = d.panel_z if d.panel_z is not None else (floor - 0.005, d.wall_top)
+        # (along s, across t, z) ranges, made into boxes in the base frame below.
+        parts = [("front", (s_in, s_front), (-hw, hw), (bottom, top)),
+                 ("floor", (s_back, s_in), (-hw, hw), (bottom, floor)),
+                 ("side wall", (s_back, s_in), (hw_in, hw), (floor, wall_top)),
+                 ("side wall", (s_back, s_in), (-hw, -hw_in), (floor, wall_top)),
+                 ("back wall", (s_back, s_back_in), (-hw, hw), (floor, wall_top))]
+        out = []
+        for name, (s0, s1), (t0, t1), (z0, z1) in parts:
+            corners = [(s * a[0] + (t_c + t) * b[0], s * a[1] + (t_c + t) * b[1]) for s in (s0, s1) for t in (t0, t1)]
+            lo = (min(p[0] for p in corners), min(p[1] for p in corners), z0)
+            hi = (max(p[0] for p in corners), max(p[1] for p in corners), z1)
+            out.append((f"{d.id} {name}", lo, hi))
+        return out
 
     def knob(self, d: Drawer, opening: float) -> Vec:
         """The handle's centre with the drawer ``opening`` m out, for marking it in a picture."""
@@ -314,6 +345,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
                 rim_z=None if rim is None else float(rim),
                 knob=_vec(row["handle_center_closed_m"]) if row.get("handle_center_closed_m") else None,  # type: ignore[arg-type]
                 wall_h=None if wall_h is None else float(wall_h),
+                panel_z=_vec(row["front_panel_z_m"], 2) if row.get("front_panel_z_m") else None,  # type: ignore[arg-type]
             )
             if dr.id != f"r{dr.row}c{dr.col}":
                 raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")
@@ -331,6 +363,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
         approach = grasp.get("approach") or (-pull[0], -pull[1], -pull[2])
         open_value = grasp.get("preshape_value", grasp.get("release_value"))
         pick_above = (d.get("pick") or {}).get("approach_tcp_height_above_support_m")
+        outer = cab.get("drawer_outer_m") or {}
         return Fixture(
             drawers=drawers,
             pull_axis=pull,
@@ -353,6 +386,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
             handle_protrusion_m=float((cab.get("handle_m") or {}).get("protrusion", 0.0)),
             handle_size=(None if not {"protrusion", "width", "height"} <= set(cab.get("handle_m") or {}) else
                          tuple(float(cab["handle_m"][k]) for k in ("protrusion", "width", "height"))),  # type: ignore[arg-type]
+            drawer_outer=(float(outer["width"]), float(outer["depth"])) if {"width", "depth"} <= set(outer) else None,
         )
     except (KeyError, TypeError, IndexError) as exc:
         raise FixtureError(f"cabinet calib: {exc!r}") from exc

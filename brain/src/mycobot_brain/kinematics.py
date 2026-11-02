@@ -149,9 +149,43 @@ class Chain:
     flange: Mat = field(default_factory=identity)
     #: flange → each named tool frame ("camera" is the optical frame: z forward, x right, y down).
     tools: Dict[str, Mat] = field(default_factory=dict)
+    #: link frame names: the base, then the child of each joint (the sim calib's URDF names).
+    links: Sequence[str] = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint6_flange")
+    #: more frames welded to the arm: name → (parent frame, parent → this), parents listed first.
+    fixed: Dict[str, Tuple[str, Mat]] = field(default_factory=dict)
 
     def tool(self, name: str) -> Mat:
         return identity() if name == "flange" else self.tools[name]
+
+    def frames(self, q_deg: Sequence[float]) -> Dict[str, Mat]:
+        """Every named frame in the base frame: links, ``base``, ``flange``, tools and fixed frames."""
+        if len(q_deg) != len(self.joints):
+            raise ValueError(f"need {len(self.joints)} joint angles, got {len(q_deg)}")
+        t = self.base
+        out = {"base": t, self.links[0]: t}
+        for name, joint, q in zip(self.links[1:], self.joints, q_deg):
+            t = mul(mul(t, joint.origin), transform(axis_angle(joint.axis, joint.model_rad(q))))
+            out[name] = t
+        flange = mul(t, self.flange)
+        out["flange"] = flange
+        for name, tool in self.tools.items():
+            out[name] = mul(flange, tool)
+        for name, (parent, tf) in self.fixed.items():
+            out[name] = mul(out[parent], tf)
+        return out
+
+    def frame_names(self) -> List[str]:
+        return list(dict.fromkeys(["base", *self.links, "flange", *self.tools, *self.fixed]))
+
+    def frame_depth(self, name: str) -> int:
+        """How many joints lie between the base and frame ``name`` (0: the base)."""
+        if name == "base":
+            return 0
+        if name in self.links:
+            return list(self.links).index(name)
+        if name in self.fixed:
+            return self.frame_depth(self.fixed[name][0])
+        return len(self.joints)
 
     def _walk(self, q_deg: Sequence[float]) -> Tuple[List[Tuple[Vec, Vec, float]], Mat]:
         """Each joint's world origin, world axis and sign; then base → flange."""

@@ -84,7 +84,10 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   handles, pull axis, floors, catalogue, handover; never contents),
   `drawer_vlm.py` (command parse, cabinet view, what is in a drawer),
   `drawers.py` (`DrawerTask`, a `PickPlace` subclass: handle grasp + straight
-  pull/push, in-drawer pick, put, handover, find loop), `cli.py`.
+  pull/push, in-drawer pick, put, handover, find loop; joint moves routed round
+  what is in the way), `collision.py` (the calib's `robot_collision` capsules:
+  link pairs and links vs table/cabinet/handles/open trays, 5 mm, every 2 deg
+  of every move), `cli.py`.
 - `camera-push/camera_push.py`: Jetson, Python 3.8 stdlib + `ffmpeg`. Grabs
   `/dev/video0` (MJPG), re-encodes every 1/rate-th frame, pushes the newest.
 - `tools/golden_frames.py`: pymycobot over a pty.
@@ -94,7 +97,9 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   prompts on sim-scene's ground frames, per view and prompt variant.
   `tools/d3_sim_run.sh` (one drawer run: reset with a layout → truth before →
   record → `drawer --execute` → truth after) and `tools/d3_score.py`. Truth is
-  read only by these.
+  read only by these. `tools/d3_collision_replay.py`: a run's commanded path
+  through the brain's capsule check (sim-scene's hull audit is the one that
+  scores).
 
 ## Relation to other repos
 

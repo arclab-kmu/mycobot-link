@@ -4,8 +4,11 @@ The split of work: the VLM says where things are in an image and whether a
 step worked; this code does the geometry (pixel → camera ray from K and FK of
 the *measured* angles → a plane of known height → base xyz → IK) and walks
 the arm there in waypoints of at most ``max_step`` degrees per joint, waiting
-for the measured angles to arrive before each next one. The arm server still
-checks every waypoint (limits, 20 deg from measured, speed, gate).
+for the measured angles to arrive before each next one. With the calib's
+``robot_collision`` every move is first checked every 2 deg for the arm's
+links against each other and the table (:mod:`mycobot_brain.collision`).
+The arm server still checks every waypoint (limits, 20 deg from measured,
+speed, gate).
 
 Sequence: look pose → locate both → camera over the block, look again and
 refine → pre-grasp above it → descend → close → lift → "is it held?" →
@@ -32,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from mycobot_brain import grounding, kinematics
+from mycobot_brain import collision, grounding, kinematics
 from mycobot_brain.calib import Calib
 from mycobot_brain.camera import CameraLink, Frame
 from mycobot_brain.kinematics import IKError, Vec
@@ -49,6 +52,10 @@ TILTS_DEG = (0, 5, 10, 15)
 
 class PickPlaceError(RuntimeError):
     """The sequence cannot go on: nothing to aim at, no IK, or the arm did not arrive."""
+
+
+class PathBlocked(PickPlaceError):
+    """A move would run the arm into itself or the scene (the table, the cabinet, an open drawer)."""
 
 
 @dataclass
@@ -76,6 +83,8 @@ class Settings:
     coords: str = "norm1000"
     shape: str = "bbox"
     refine: bool = True
+    robot_margin_m: float = 0.005  # the arm's capsules apart from each other and from the scene
+    check_step_deg: float = collision.CHECK_STEP_DEG
 
 
 class RunLog:
@@ -396,24 +405,68 @@ class PickPlace:
 
     def _goto(self, goal: Sequence[float], phase: str, floor: Optional[float], speed: Optional[int] = None) -> None:
         """Joint-space line from the measured angles; refuses one whose TCP dips below ``floor``."""
-        path = kinematics.joint_path(self._measured(), goal, self.s.max_step)
+        here = self._measured()
+        path = kinematics.joint_path(here, goal, self.s.max_step)
         if floor is not None:
             low = min(kinematics.position(self.calib.chain.pose(q, "tcp"))[2] for q in path)
             if low < floor - 1e-3:
                 raise PickPlaceError(f"{phase}: the joint path takes the TCP down to z={low:.3f} (floor {floor:.3f})")
-        self._check_path(path, phase)
+        self._check_path([here] + path, phase)
         self._send(path, phase, speed or self.s.speed)
 
-    def _check_path(self, path: Sequence[Sequence[float]], phase: str) -> None:
-        """Raise if a joint-space path runs into the scene; the table scene has nothing but the floor."""
+    def _check_path(self, path: Sequence[Sequence[float]], phase: str, line: bool = False) -> None:
+        """Raise if a path (from where the arm is) runs the arm into itself or the scene; ``line``: a
+        straight line of the TCP (descend, lift, pull), not a joint move."""
+        why = self._path_clear(path)
+        if why is not None:
+            raise PathBlocked(f"{phase}: the path would put the {why}")
+
+    def _path_clear(self, path: Sequence[Sequence[float]]) -> Optional[str]:
+        """None if the arm's links keep ``robot_margin_m`` from each other and the table all along ``path``
+        (its first entry is where the arm starts). The pads may come closer to the table: a grasp puts
+        them there, and the grasp height keeps them off it."""
+        if self.calib.robot is None:
+            return None
+        table = [("table", (-9.0, -9.0, -9.0), (9.0, 9.0, self.calib.table_z))]
+        for q in collision.densify(path, self.s.check_step_deg):
+            why = self._robot_clear(q, table, fingers_near={"table"})
+            if why is not None:
+                return f"{why} at {_r(q, 1)}"
+        return None
+
+    def _robot_clear(self, q: Sequence[float], boxes: Sequence[Tuple[str, Sequence[float], Sequence[float]]],
+                     fingers_near: Any = ()) -> Optional[str]:
+        """None if at ``q`` the listed link pairs and every moving link and ``boxes`` (name, lo, hi) keep
+        ``robot_margin_m`` apart; the finger links may come closer to the boxes in ``fingers_near``
+        (``all``: every box)."""
+        robot, m = self.calib.robot, self.s.robot_margin_m
+        assert robot is not None
+        placed = robot.place(self.calib.chain, q)
+        why = robot.self_hit(placed, m)
+        if why is not None:
+            return why
+        for p in placed:
+            name, r = p.capsule.name, p.capsule.radius
+            if name in robot.still:
+                continue
+            finger = name in robot.fingers
+            for box, lo, hi in boxes:
+                if finger and (fingers_near == "all" or box in fingers_near):
+                    continue
+                gap = collision.box_distance(p.a, p.b, lo, hi, within=r + m) - r
+                if gap < m:
+                    return f"{name} {gap * 1000:.0f} mm from the {box}"
+        return None
 
     def _line(self, goal: Sequence[float], phase: str, approach: Optional[Vec] = DOWN, jaw: Optional[Vec] = None,
               speed: Optional[int] = None) -> None:
+        here = self._measured()
         try:
-            path = kinematics.line_path(self.calib.chain, self._measured(), goal, step_m=self.s.line_step_m,
+            path = kinematics.line_path(self.calib.chain, here, goal, step_m=self.s.line_step_m,
                                         max_step=self.s.max_step, approach=approach, jaw=jaw)
         except IKError as exc:
             raise PickPlaceError(f"{phase}: {exc}") from exc
+        self._check_path([here] + path, phase, line=True)
         self._send(path, phase, speed or self.s.slow_speed)
 
     def _send(self, path: Sequence[Sequence[float]], phase: str, speed: int) -> None:

@@ -282,8 +282,9 @@ def test_joint_moves_keep_the_pad_tips_off_the_handles(tmp_path):
     scene = cs.load_sim_like()
     task = drawers.DrawerTask(None, None, scene, None, pickplace.RunLog(tmp_path), drawers.DrawerSettings())
     back_off_4cm = [-27.71, -65.94, -97.77, -16.48, 112.29, -135.08]  # measured in s500
-    path = kinematics.joint_path(back_off_4cm, scene.fixture.cabinet_look_pose_deg, 8.0)
-    assert "pad tips" in task._path_clear(path) and task._path_clear(path, at_handle=True) is None
+    path = [back_off_4cm] + kinematics.joint_path(back_off_4cm, scene.fixture.cabinet_look_pose_deg, 8.0)
+    why = task._path_clear(path)
+    assert ("pad tips" in why or "a finger" in why) and task._path_clear(path, at_handle=True) is None
     assert scene.fixture.standoff_m == 0.08
     for d in scene.fixture.drawers.values():
         task._handle_plan(d)  # every handle: look <-> standoff, shut and open, clear of the others

@@ -333,6 +333,7 @@ def sim_like_dict():
         "handle_grasp": {"approach": None, "jaw_axis": [0.0, 0.0, 1.0], "pregrasp_m": 0.04, "far_m": 0.08,
                          "preshape_value": 55, "close_value": 0, "release_value": 55},
         "handle_m": {"protrusion": 0.018, "width": 0.032, "height": 0.024},
+        "drawer_outer_m": {"width": 0.078, "depth": 0.084, "front_height": 0.035},
         "drawers": drawers,
     }
     d["pick"] = {"jaw_yaw_deg": 180.0, "approach_tcp_height_above_support_m": 0.057}
@@ -346,3 +347,32 @@ def sim_like_dict():
 
 def load_sim_like():
     return calib.from_dict(sim_like_dict(), "cabinet_scene.py (sim-scene numbers)")
+
+
+#: Made-up capsules in calib v3's ``robot_collision`` format (BOARD 2026-11-02), shaped like the URDF
+#: hulls' boxes: the base, the upper arm and forearm, the gripper body, the camera, the two pads. Not
+#: sim-scene's numbers; those replace these when v3 lands.
+SYNTH_CAPSULES = {
+    "capsules": [
+        {"name": "joint1", "frame": "joint1", "a_m": [0, 0, 0.02], "b_m": [0, 0, 0.08], "radius_m": 0.06},
+        {"name": "joint3", "frame": "joint3", "a_m": [-0.11, 0, 0.058], "b_m": [0, 0, 0.058], "radius_m": 0.035},
+        {"name": "joint4", "frame": "joint4", "a_m": [-0.094, 0, 0.006], "b_m": [0, 0, 0.006], "radius_m": 0.033},
+        {"name": "gripper_base", "frame": "joint6_flange", "a_m": [0, 0, 0.03], "b_m": [0, 0, 0.045],
+         "radius_m": 0.035},
+        {"name": "camera_flange", "frame": "joint6_flange", "a_m": [-0.035, 0.035, 0.01], "b_m": [0, 0, 0.01],
+         "radius_m": 0.02},
+        {"name": "gripper_left3", "frame": "joint6_flange", "a_m": [-0.013, -0.013, 0.088],
+         "b_m": [-0.013, -0.013, 0.11], "radius_m": 0.01},
+        {"name": "gripper_right3", "frame": "joint6_flange", "a_m": [0.013, 0.013, 0.088],
+         "b_m": [0.013, 0.013, 0.11], "radius_m": 0.01},
+    ],
+    "pairs": [["joint1", "joint4"], ["joint1", "gripper_base"], ["joint1", "camera_flange"],
+              ["joint1", "gripper_left3"], ["joint1", "gripper_right3"], ["joint3", "gripper_base"],
+              ["joint3", "camera_flange"]],
+}
+
+
+def load_sim_like_with_capsules(capsules=None):
+    d = sim_like_dict()
+    d["robot_collision"] = capsules or SYNTH_CAPSULES
+    return calib.from_dict(d, "cabinet_scene.py (sim-scene numbers, made-up capsules)")

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
+from mycobot_brain import collision
 from mycobot_brain import fixture as fixture_mod
 from mycobot_brain.kinematics import Chain, Intrinsics, Joint, Mat, quat_matrix, rpy_matrix, transform
 
@@ -38,6 +39,8 @@ class Calib:
     pad_below_tcp: float = 0.0
     source: str = ""
     fixture: Optional[fixture_mod.Fixture] = None
+    #: the arm's links as capsules (calib v3 ``robot_collision``); None: only the TCP and camera are checked.
+    robot: Optional[collision.RobotBody] = None
 
     @property
     def block_plane_z(self) -> float:
@@ -89,10 +92,25 @@ def chain_from(spec: Dict[str, Any]) -> Chain:
         ))
     if len(joints) != 6:
         raise CalibError(f"need 6 joints, got {len(joints)}")
+    links = [rows[0]["parent"]] + [j["child"] for j in rows] if all("child" in j for j in rows) and "parent" in rows[0] \
+        else None
+    # The fixed joints from the flange to the camera and TCP name the frames a collision capsule may sit in.
+    fixed: Dict[str, Any] = {}
+    for j in [*spec.get("flange_to_camera_joints", ()), *spec.get("flange_to_tcp_joints", ())]:
+        if j.get("type", "fixed") == "fixed" and j["child"] not in fixed:
+            fixed[j["child"]] = (j["parent"], _tf(j, j["child"]))
     tools = {"camera": _tf(_need(spec, "flange_to_camera", "flange_T_camera_optical"), "flange_to_camera"),
              "tcp": _tf(_need(spec, "flange_to_tcp", "flange_T_tcp"), "flange_to_tcp")}
-    return Chain(joints=joints, base=_tf(spec.get("base", {}), "base"),
-                 flange=_tf(spec.get("flange", spec.get("joint6_to_flange", {})), "flange"), tools=tools)
+    chain = Chain(joints=joints, base=_tf(spec.get("base", {}), "base"),
+                  flange=_tf(spec.get("flange", spec.get("joint6_to_flange", {})), "flange"), tools=tools)
+    if links:
+        chain.links = links
+    known = set(chain.frame_names())
+    for name, (parent, tf) in fixed.items():
+        if parent in known or parent in fixed:
+            chain.fixed[name] = (parent, tf)
+            known.add(name)
+    return chain
 
 
 def intrinsics_from(spec: Dict[str, Any]) -> Intrinsics:
@@ -130,8 +148,10 @@ def from_dict(d: Dict[str, Any], source: str = "") -> Calib:
         if look is None:
             raise CalibError("missing look_pose_deg")
         pads = (d.get("tcp") or {}).get("pad_extent_along_tool_z_m")
+        chain = chain_from(d["chain"] if "chain" in d else d)
+        robot = collision.from_dict(d["robot_collision"], chain) if d.get("robot_collision") else None
         calib = Calib(
-            chain=chain_from(d["chain"] if "chain" in d else d),
+            chain=chain,
             camera=intrinsics_from(_need(d, "camera", "intrinsics")),
             table_z=table_z,
             block_edge=block_edge,
@@ -143,8 +163,9 @@ def from_dict(d: Dict[str, Any], source: str = "") -> Calib:
             pad_below_tcp=float(max(pads)) if pads else 0.0,
             source=source,
             fixture=fix,
+            robot=robot,
         )
-    except fixture_mod.FixtureError as exc:
+    except (fixture_mod.FixtureError, collision.CollisionSpecError) as exc:
         raise CalibError(f"{source or 'calib'}: {exc}") from exc
     except (KeyError, TypeError, IndexError) as exc:
         raise CalibError(f"{source or 'calib'}: {exc!r}") from exc
