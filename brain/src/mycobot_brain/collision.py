@@ -25,6 +25,8 @@ from mycobot_brain.kinematics import Chain, Mat, Vec, apply, inverse, joint_path
 CHECK_STEP_DEG = 2.0
 #: links that close on what is grasped (a handle, an object on a floor): the parallel gripper's pads.
 FINGER_WORDS = ("finger", "pad", "left3", "right3")
+#: the hand: what reaches in to a handle or a drawer floor with the pads (gripper body, camera, pads).
+HAND_WORDS = ("gripper", "camera")
 
 
 class CollisionSpecError(ValueError):
@@ -56,6 +58,8 @@ class RobotBody:
     fingers: FrozenSet[str]
     #: links fixed to the base frame (the base itself): they cannot move into the fixture.
     still: FrozenSet[str]
+    #: the hand bodies, which may come closer to the fixture while they grasp (leader 2026-11-02: 2 mm)
+    hand: FrozenSet[str] = frozenset()
     #: links given as a box instead of capsules (v3's ``base_box``: the base hull's exact bounds; its
     #: capsules overshoot it 10-30 mm): name -> (base frame -> box frame, box lo, box hi). Fixed links only.
     boxes: Dict[str, Tuple[Mat, Vec, Vec]] = field(default_factory=dict)
@@ -226,7 +230,8 @@ def from_dict(spec: Dict[str, Any], chain: Chain) -> RobotBody:
     ``frame`` is one of the chain's link frames (``joint1`` = the base .. ``joint6_flange``) or a frame
     fixed to them that the calib lists (``tool_mount``, ``tcp``, ``camera`` ...). ``capsules`` may
     instead map a link name to one capsule or a list of them. Without ``pairs``, every two links two
-    or more joints apart. ``fingers`` names the links that close on a grasp (else by name: pads).
+    or more joints apart. ``fingers`` names the links that close on a grasp (else by name: pads);
+    ``hand`` the hand bodies (else the fingers and the gripper/camera links).
     ``base_box`` (``{"name", "frame", "center_m", "size_m"}``, a link fixed to the base) replaces that
     link's capsules with its exact box.
     """
@@ -273,5 +278,8 @@ def from_dict(spec: Dict[str, Any], chain: Chain) -> RobotBody:
         # The box stands in for the link's capsules; it never moves, so it is never checked against the fixture.
         capsules = [cap for cap in capsules if cap.name != name]
         still = still | {name}
-    return RobotBody(capsules, pairs, finger_set, still, boxes)
+    hand = spec.get("hand")
+    hand_set = frozenset(hand) if hand is not None else finger_set | frozenset(
+        n for n in names if any(w in n.lower() for w in HAND_WORDS))
+    return RobotBody(capsules, pairs, finger_set, still, boxes=boxes, hand=hand_set)
 

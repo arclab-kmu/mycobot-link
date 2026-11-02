@@ -439,6 +439,7 @@ def line_path(
     approach: Optional[Sequence[float]] = (0.0, 0.0, -1.0),
     jaw: Optional[Sequence[float]] = None,
     approach_end: Optional[Sequence[float]] = None,
+    either_jaw: bool = True,
 ) -> List[List[float]]:
     """Joint waypoints that take ``tool`` along a straight line to ``goal``
     (descend, lift, pull a drawer), each IK seeded from the one before.
@@ -454,7 +455,7 @@ def line_path(
         if approach is not None and approach_end is not None:
             mix = [x + (y - x) * i / n for x, y in zip(approach, approach_end)]
             a = tuple(v / norm(mix) for v in mix)
-        nxt = solve_ik(chain, q, target, tool=tool, approach=a, jaw=jaw)
+        nxt = solve_ik(chain, q, target, tool=tool, approach=a, jaw=jaw, either_jaw=either_jaw)
         out += joint_path(q, nxt, max_step)
         q = nxt
     return out

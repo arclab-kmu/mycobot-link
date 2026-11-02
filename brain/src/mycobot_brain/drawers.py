@@ -19,6 +19,7 @@ Commands (Korean in, as Hojin says them):
 from __future__ import annotations
 
 import contextlib
+import itertools
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
@@ -325,14 +326,47 @@ class DrawerTask(PickPlace):
         # The table look pose first (an ordinary elbow-up arm, whatever the cabinet view needs), then
         # the drawer's own look and the cabinet look: one seed's branch can run into a joint limit
         # mid-pull where another's does not (r2c0 on sim-scene's numbers from v1's look pose).
-        seeds = [q for q in (self.calib.look_pose_deg, d.look_pose_deg, self.fx.cabinet_look_pose_deg) if q]
+        looks = [q for q in (self.calib.look_pose_deg, d.look_pose_deg, self.fx.cabinet_look_pose_deg) if q]
         err: Exception = PickPlaceError("no seed pose")
-        for seed in seeds:
+        tried = set()
+        # v3's grips (sim-scene's search, the whole tool rotation given) sit in arm branches none of the
+        # look poses leads to: the wrist turned on J4/J6. Each branch once: seeds that end in the same
+        # pre-grasp say nothing new. A grip given by its axes alone finds its branch from the looks.
+        more = self._more_seeds(looks) if stage.exact_jaw else iter(())
+        for seed in itertools.chain([stage.seed_deg] if stage.seed_deg else [], looks, more):
+            fx = self.fx
+            a = fx.stage_approach(stage, stage.from_m)
+            if rot is not None:
+                a = tuple(sum(rot[i][m] * a[m] for m in range(3)) for i in range(3))  # type: ignore[assignment]
+            j = stage.jaw if rot is None or stage.jaw is None else \
+                tuple(sum(rot[i][m] * stage.jaw[m] for m in range(3)) for i in range(3))
+            in0 = (stage.in_axis if rot is None or stage.in_axis is None else
+                   tuple(sum(rot[i][m] * stage.in_axis[m] for m in range(3)) for i in range(3))) or a
             try:
-                return self._try_handle_from(d, stage, rot, free, seed)
+                pre = kinematics.solve_ik(self.calib.chain, seed,
+                                          _add(fx.stage_tcp(stage, stage.from_m), in0, -fx.stage_standoff(stage, stage.from_m)),
+                                          approach=a, jaw=j, either_jaw=not stage.exact_jaw)
+            except IKError as exc:
+                err = exc if not tried else err  # a pre-grasp no seed reaches; else keep what a reached one hit
+                continue
+            branch = tuple(round(x / 5.0) for x in pre)
+            if branch in tried:
+                continue
+            tried.add(branch)
+            try:
+                return self._try_handle_from(d, stage, rot, free, pre)
             except (IKError, PickPlaceError) as exc:
-                err = exc
+                if len(tried) == 1 or not isinstance(exc, IKError):
+                    err = PickPlaceError(f"{len(tried)} arm branch(es) reach the pre-grasp; {exc}")
         raise err
+
+    @staticmethod
+    def _more_seeds(looks: Sequence[Sequence[float]]) -> Iterator[List[float]]:
+        """The look poses with the wrist turned: J4 in 45 deg steps, J6 in 45 deg steps."""
+        for q in looks:
+            for j4 in (-90.0, -45.0, 0.0, 45.0):
+                for j6 in (-135.0, -45.0, 45.0, 135.0, 180.0):
+                    yield [q[0], q[1], q[2], j4, q[4], j6]
 
     def _try_handle_from(self, d: Drawer, stage: HandleStage, rot: Optional[kinematics.Mat], free: bool,
                          seed: Sequence[float]) -> HandlePlan:
@@ -346,11 +380,14 @@ class DrawerTask(PickPlace):
         j = None if stage.jaw is None else turn(stage.jaw)
         in_axis = None if stage.in_axis is None else turn(stage.in_axis)
         in0 = in_axis or a
+        either = not stage.exact_jaw
         pre = kinematics.solve_ik(chain, seed, _add(fx.stage_tcp(stage, s0), in0, -fx.stage_standoff(stage, s0)),
-                                  approach=a, jaw=j)
-        to_handle = kinematics.line_path(chain, pre, fx.stage_tcp(stage, s0), step_m=0.02, approach=a, jaw=j)
+                                  approach=a, jaw=j, either_jaw=either)
+        to_handle = kinematics.line_path(chain, pre, fx.stage_tcp(stage, s0), step_m=0.02, approach=a, jaw=j,
+                                         either_jaw=either)
         pull = kinematics.line_path(chain, to_handle[-1], fx.stage_tcp(stage, s1), step_m=self.s.line_step_m,
-                                    approach=None if free else a, jaw=j, approach_end=None if free else a_end)
+                                    approach=None if free else a, jaw=j, approach_end=None if free else a_end,
+                                    either_jaw=either)
         t = chain.pose(pull[-1], "tcp")
         a1, j1 = kinematics.column(t, 2), kinematics.column(t, 0) if j is not None else None
         drift = math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(a_end, a1)))))
@@ -358,7 +395,7 @@ class DrawerTask(PickPlace):
             raise PickPlaceError(f"the gripper turns {drift:.0f} deg over the pull")
         back = kinematics.line_path(chain, pull[-1],
                                     _add(fx.stage_tcp(stage, s1), in_axis or a1, -fx.stage_standoff(stage, s1)),
-                                    step_m=0.02, approach=a1, jaw=j1)
+                                    step_m=0.02, approach=a1, jaw=j1, either_jaw=either)
         # A tipped or turned gripper leans its back (and the camera) towards the cabinet face. The drawer
         # is at s0 on the way in, moves with the hand on the pull (and the push), and is at s1 on the way out.
         at0, at1 = {**self.opening, d.id: s0}, {**self.opening, d.id: s1}
@@ -421,16 +458,17 @@ class DrawerTask(PickPlace):
         try:
             q = kinematics.solve_ik(c.chain, plan.seeds[near],
                                     _add(fx.stage_tcp(stage, start), plan.in_at(start), -fx.stage_standoff(stage, start)),
-                                    approach=a, jaw=j)
+                                    approach=a, jaw=j, either_jaw=not stage.exact_jaw)
         except IKError as exc:
             raise PickPlaceError(f"{tag}: pre-grasp: {exc}") from exc
         self._goto(q, f"{tag}: pre-grasp", floor=None)
         with self._near(skip=d.id, at_handle=True):
-            self._line(fx.stage_tcp(stage, start), f"{tag}: to handle", a, j)
+            either = not stage.exact_jaw
+            self._line(fx.stage_tcp(stage, start), f"{tag}: to handle", a, j, either_jaw=either)
             self._gripper(stage.close if stage.close is not None else c.gripper_closed, "close")
             with self._near(moving=d.id):
                 self._line(fx.stage_tcp(stage, end), tag, None if plan.free else a, j, speed=self.s.handle_speed,
-                           approach_end=None if plan.free else a_end)
+                           approach_end=None if plan.free else a_end, either_jaw=either)
             self.opening[d.id] = end
             self._gripper(release, "open")
             # Back off along the tool axis as it is now (with a free heading it has turned on the way), or
@@ -439,7 +477,7 @@ class DrawerTask(PickPlace):
             a_now, j_now = kinematics.column(t, 2), (kinematics.column(t, 0) if j is not None else None)
             out = plan.in_axis if plan.in_axis is not None else a_now
             self._line(_add(fx.stage_tcp(stage, end), out, -fx.stage_standoff(stage, end)), f"{tag}: back off",
-                       a_now, j_now)
+                       a_now, j_now, either_jaw=either)
 
     def _open(self, d: Drawer, again: bool = False) -> None:
         # ``again``: the VLM does not see it open, so pull from shut whatever the code thinks.
@@ -854,7 +892,8 @@ class DrawerTask(PickPlace):
         link ``robot_margin_m`` off the listed links, the table, the cabinet body, the handles and the
         open drawers' trays. The cabinet counts its closed handles, except on a move ``at_handle``, which
         goes to one; there the fingers may touch anything, the grip is around it. The fingers may also
-        come closer to ``grasp_in``'s tray and (``table``) the table, where they grasp and let go. The drawer
+        come closer to ``grasp_in``'s tray and (``table``) the table, where they grasp and let go; there
+        and at a handle the hand bodies keep ``hand_margin_m`` off the scene. The drawer
         ``moving`` goes with the hand (a pull or a push) and is left out. ``openings`` instead of where
         the drawers are now, for a plan. ``points=False`` leaves out the TCP / pad tip / camera / finger
         points, which were made for joint moves: a straight line in (a descent past the cabinet top, say)
@@ -871,6 +910,9 @@ class DrawerTask(PickPlace):
                 boxes.append((f"open {d_id}", (c[0] - hx, c[1] - hy, d.floor_z - 0.01),
                               (c[0] + hx, c[1] + hy, d.floor_z + d.interior_size[2])))
         tip, half, knobs = self.calib.pad_below_tcp, self.s.finger_half_m, fx.knob_boxes(openings)
+        # The leader's rule (2026-11-02), as sim-scene's D0 checks it: the hand bodies keep 2 mm off the
+        # scene while they grasp a handle or pick/place in a drawer or on the mat, 5 mm otherwise.
+        grasping = at_handle or grasp_in is not None or table
         scene: List[Tuple[str, Sequence[float], Sequence[float]]] = []
         near: Any = "all" if at_handle else ({"table"} if table else set())
         if self.calib.robot is not None:
@@ -884,7 +926,7 @@ class DrawerTask(PickPlace):
                         near |= {name for name, _, _ in parts}
         for q in collision.densify(path, self.s.check_step_deg):
             if not points:
-                why = self._robot_clear(q, scene, near) if scene else None
+                why = self._robot_clear(q, scene, near, grasping) if scene else None
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
                 continue
@@ -906,7 +948,7 @@ class DrawerTask(PickPlace):
                     if _in_box(pt, k_lo, k_hi, m):
                         return f"a finger at {_r(pt, 3)} on the handle of {d_id}"
             if scene:
-                why = self._robot_clear(q, scene, near)
+                why = self._robot_clear(q, scene, near, grasping)
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
         return None

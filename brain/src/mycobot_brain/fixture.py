@@ -68,6 +68,11 @@ class HandleStage:
     preshape: Optional[int] = None  # gripper to come in with
     close: Optional[int] = None
     release: Optional[int] = None
+    #: the jaw's sign is part of the grip (v3 gives the whole tool rotation): the gripper body and the
+    #: camera sit off the tool axis, and the plan that was checked had them on this side
+    exact_jaw: bool = False
+    #: joint angles near the calib's own plan for this grip (its pre-grasp), to start IK from
+    seed_deg: Optional[List[float]] = None
 
 
 @dataclass(frozen=True)
@@ -413,7 +418,9 @@ def _stage(drawer_id: str, k: int, st: Dict[str, Any], cabinet: Dict[str, Any], 
                        None if jaw is None else _unit(_vec(jaw)), float(standoff),
                        None if backoff is None else float(backoff), None if in_axis is None else _unit(_vec(in_axis)),
                        None if preshape is None else int(preshape), None if close is None else int(close),
-                       None if release is None else int(release))
+                       None if release is None else int(release),
+                       exact_jaw=bool(st.get("exact_jaw", st.get("R_base_tool") is not None)),
+                       seed_deg=_pose(_first(st, "q_pre_deg", "q_from_deg", "seed_deg")))
 
 
 def _side_top(row: Dict[str, Any], cabinet: Dict[str, Any], open_m: float) -> Tuple[HandleStage, ...]:

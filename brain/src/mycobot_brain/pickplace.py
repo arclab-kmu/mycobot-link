@@ -84,6 +84,9 @@ class Settings:
     shape: str = "bbox"
     refine: bool = True
     robot_margin_m: float = 0.005  # the arm's capsules apart from each other and from the scene
+    #: the hand bodies off the scene while they grasp (handle grip/pull/push, in-drawer pick/place):
+    #: sim-scene checks those phases at 2 mm, and the brain uses the same rule (leader 2026-11-02)
+    hand_margin_m: float = 0.002
     check_step_deg: float = collision.CHECK_STEP_DEG
 
 
@@ -435,10 +438,10 @@ class PickPlace:
         return None
 
     def _robot_clear(self, q: Sequence[float], boxes: Sequence[Tuple[str, Sequence[float], Sequence[float]]],
-                     fingers_near: Any = ()) -> Optional[str]:
+                     fingers_near: Any = (), grasping: bool = False) -> Optional[str]:
         """None if at ``q`` the listed link pairs and every moving link and ``boxes`` (name, lo, hi) keep
         ``robot_margin_m`` apart; the finger links may come closer to the boxes in ``fingers_near``
-        (``all``: every box)."""
+        (``all``: every box), and while ``grasping`` the hand bodies to ``hand_margin_m`` of any box."""
         robot, m = self.calib.robot, self.s.robot_margin_m
         assert robot is not None
         placed = robot.place(self.calib.chain, q)
@@ -450,21 +453,22 @@ class PickPlace:
             if name in robot.still:
                 continue
             finger = name in robot.fingers
+            mf = self.s.hand_margin_m if grasping and name in robot.hand else m
             for box, lo, hi in boxes:
                 if finger and (fingers_near == "all" or box in fingers_near):
                     continue
-                gap = collision.box_distance(p.a, p.b, lo, hi, within=r + m) - r
-                if gap < m:
+                gap = collision.box_distance(p.a, p.b, lo, hi, within=r + mf) - r
+                if gap < mf:
                     return f"{name} {gap * 1000:.0f} mm from the {box}"
         return None
 
     def _line(self, goal: Sequence[float], phase: str, approach: Optional[Vec] = DOWN, jaw: Optional[Vec] = None,
-              speed: Optional[int] = None, approach_end: Optional[Vec] = None) -> None:
+              speed: Optional[int] = None, approach_end: Optional[Vec] = None, either_jaw: bool = True) -> None:
         here = self._measured()
         try:
             path = kinematics.line_path(self.calib.chain, here, goal, step_m=self.s.line_step_m,
                                         max_step=self.s.max_step, approach=approach, jaw=jaw,
-                                        approach_end=approach_end)
+                                        approach_end=approach_end, either_jaw=either_jaw)
         except IKError as exc:
             raise PickPlaceError(f"{phase}: {exc}") from exc
         self._check_path([here] + path, phase, line=True)

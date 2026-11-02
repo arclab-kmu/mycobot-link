@@ -243,3 +243,25 @@ def test_v3_base_box_stands_in_for_the_base_capsules():
             assert gaps[0][:2] == ("joint1", "gripper_left3") and gaps[0][2] == pytest.approx(expect, abs=1e-6)
     with pytest.raises(calib.CalibError, match="not fixed to the base"):
         cs.load_sim_like_with_capsules(dict(caps, base_box=dict(caps["base_box"], frame="joint3")))
+
+
+def test_the_hand_keeps_2_mm_off_the_scene_only_while_it_grasps(tmp_path):
+    """Leader's rule (2026-11-02), the same in sim-scene's check: self pairs 5 mm; the scene 5 mm in free
+    moves; the hand bodies (gripper body, pads, camera) 2 mm at a handle and in the drawer they grasp in."""
+    task = task_with_capsules(tmp_path)
+    assert task.calib.robot.hand == {"gripper_base", "camera_flange", "gripper_left3", "gripper_right3"}
+    q = task.calib.look_pose_deg
+    gb = next(p for p in task.calib.robot.place(task.calib.chain, q) if p.capsule.name == "gripper_base")
+    end = min(gb.a, gb.b, key=lambda e: e[2])
+    post = [("post", (end[0] - 0.01, end[1] - 0.01, 0.0), (end[0] + 0.01, end[1] + 0.01, end[2] - gb.capsule.radius - 0.003))]
+    assert task._robot_clear(q, post, "all") == "gripper_base 3 mm from the post"
+    assert task._robot_clear(q, post, "all", grasping=True) is None
+    # Which moves count as grasping: at a handle, in the drawer or on the mat it grasps on; not a free move.
+    seen = []
+    task._robot_clear = lambda q, boxes, near, grasping=False: seen.append(grasping)
+    path = [q, q]
+    for kw, want in ((dict(), False), (dict(at_handle=True, skip="r1c1"), True), (dict(grasp_in="r1c1"), True),
+                     (dict(table=True), True)):
+        seen.clear()
+        task._path_clear(path, **kw)
+        assert set(seen) == {want}, kw

@@ -269,3 +269,15 @@ def test_a_drawer_v3_calls_not_openable_is_out_of_use_and_its_null_handle_does_n
     row.update(openable=False, handle_closed_m=None, approach=None, jaw_axis=None, handle_grasp=None)
     fx = calib.from_dict(d).fixture
     assert not fx.drawers[row["id"]].usable and fx.drawers["r0c0"].usable
+
+
+def test_a_grip_given_as_a_whole_tool_rotation_keeps_its_jaw_sign():
+    """v3 gives each stage's R_base_tool: the camera and the gripper body sit off the tool axis, so the
+    jaw's sign is part of the grip sim-scene checked, unlike a grip given by its axes alone."""
+    d = cs.with_two_stage_handles(cs.sim_like_dict(), ids={"r1c1"})
+    row = next(r for r in d["cabinet"]["drawers"] if r["id"] == "r1c1")
+    row["handle_stages"][1].update(R_base_tool=[[0, 1, 0], [1, 0, 0], [0, 0, -1]], q_pre_deg=[1, 2, 3, 4, 5, 6])
+    fx = calib.from_dict(d).fixture
+    side, top = fx.stages(fx.drawers["r1c1"])
+    assert not side.exact_jaw and side.seed_deg is None
+    assert top.exact_jaw and top.seed_deg == [1, 2, 3, 4, 5, 6]
