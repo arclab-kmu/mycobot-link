@@ -547,12 +547,19 @@ class DrawerTask(PickPlace):
             self.log.event("taught_check", phase=phase, why=why)
         self._send(path, phase, leg.speed or speed or self.s.speed)
 
-    def _taught_route(self, here: Sequence[float], goal: Sequence[float]) -> Optional[Tuple[str, TaughtLeg]]:
-        """A taught route that starts where the arm is (3 deg) and ends at ``goal`` (0.5 deg)."""
-        for name, leg in self._routes:
-            if max(abs(a - b) for a, b in zip(here, leg.q[0])) <= 3.0 and \
-                    max(abs(a - b) for a, b in zip(goal, leg.q[-1])) <= 0.5:
-                return name, leg
+    def _taught_route(self, here: Sequence[float], goal: Sequence[float]) -> Optional[List[Tuple[str, TaughtLeg]]]:
+        """Taught routes, end to end (up to 3), from where the arm is (3 deg) to ``goal`` (0.5 deg): v3.2's
+        routes go one way round, cabinet look -> tilted -> top-down -> cabinet look."""
+        def near(a: Sequence[float], b: Sequence[float], tol: float) -> bool:
+            return max(abs(x - y) for x, y in zip(a, b)) <= tol
+
+        paths: List[List[Tuple[str, TaughtLeg]]] = [[r] for r in self._routes if near(here, r[1].q[0], 3.0)]
+        for _ in range(3):
+            for path in paths:
+                if near(goal, path[-1][1].q[-1], 0.5):
+                    return path
+            paths = [path + [r] for path in paths for r in self._routes
+                     if r not in path and near(path[-1][1].q[-1], r[1].q[0], 0.5)]
         return None
 
     def taught_fk_mm(self) -> Optional[float]:
@@ -1102,8 +1109,9 @@ class DrawerTask(PickPlace):
         here = self._measured()
         route = self._taught_route(here, goal) if taught else None
         if route is not None:
-            self.log.event("taught", phase=phase, route=route[0])
-            self._play(route[1], phase, speed)
+            for name, leg in route:
+                self.log.event("taught", phase=phase, route=name)
+                self._play(leg, phase, speed)
             return
         if floor is not None:
             # sim-scene's tilted looks into r1c2 and r2c2 hold the TCP beside the drawer below the

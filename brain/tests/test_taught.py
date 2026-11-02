@@ -98,3 +98,21 @@ def test_a_find_plays_the_taught_open_close_and_view_routes(link, camera, telepo
     pulled = [e["angles_deg"] for e in ev if e["event"] == "move" and e["phase"] == "open r2c1"]
     assert pulled == [pytest.approx(list(q), abs=0.01) for q in t.open[0].legs["pull"].q[1:]]
     assert not any(e["event"] == "skip" and "not a taught sequence" in e["why"] for e in ev)
+
+
+def test_one_way_taught_routes_are_chained(tmp_path):
+    """v3.2 (sim-scene 12:43) teaches cabinet look -> tilted -> top-down -> cabinet look; from the tilted
+    look back to the cabinet look the brain goes on round by the top-down view."""
+    d = with_taught(cs.sim_like_dict(), {"r2c1"})
+    row = next(r for r in d["cabinet"]["drawers"] if r["id"] == "r2c1")
+    chain = calib.from_dict(d).chain
+    look = calib.from_dict(d).fixture.cabinet_look_pose_deg
+    routes = row["taught"]["routes"]
+    routes["topdown>cabinet_look"] = _leg([row["topdown_pose_deg"], look], chain, tcp=False)
+    del routes["tilted>cabinet_look"], routes["topdown>tilted"]
+    task = drawers.DrawerTask(None, None, calib.from_dict(d), None, pickplace.RunLog(tmp_path / "run"),
+                              drawers.DrawerSettings())
+    names = [n for n, _ in task._taught_route(row["look_pose_deg"], look)]
+    assert names == ["r2c1 tilted>topdown", "r2c1 topdown>cabinet_look"]
+    assert [n for n, _ in task._taught_route(look, row["look_pose_deg"])] == ["r2c1 cabinet_look>tilted"]
+    assert task._taught_route(look, [0.0] * 6) is None
