@@ -837,20 +837,9 @@ class DrawerTask(PickPlace):
             self._trail = [list(self._lifted)]  # the way up to the held check's view, to retrace
             self._phase("check held")
             if view is not None:
-                # Straight up to the close look's height (or as high as the arm reaches there), the tool as
-                # it gripped: no wrist roll or tilt with the object in hand (sim-scene 14:03: the close
-                # look's own pose rolled J6 82 -> 47 -> 82 and an off-centre cone crept out; leader 14:04).
-                view_z = kinematics.position(c.chain.pose(view, "tcp"))[2]
-                if view_z > lift + 0.005:
-                    try:
-                        up_z = self._reachable_z(xyz, [view_z, (view_z + lift) / 2], approach, jaw)
-                    except PickPlaceError:
-                        up_z = lift
-                    if up_z > lift + 0.005:
-                        try:
-                            self._line((xyz[0], xyz[1], up_z), "lift: to the look", approach, jaw)
-                        except PickPlaceError as exc:
-                            self.log.event("skip", why=f"no straight lift to the look: {exc}")
+                # Checked from right here, the lift pose: no rise and fall, no roll, with the object in hand.
+                # A cone crept out of the pads coming back down from the held check's height (D3 v3.2 s502_c,
+                # 3c40c7a; leader 14:26), and before that when the close look's pose rolled the wrist.
                 question = grounding.held_question_from_above(desc, self._gripper_side())
                 images = [("Before the grasp:", before)]
             else:

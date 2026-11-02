@@ -246,10 +246,10 @@ def held_question_same_view(pick_label: str, gripper_side: str) -> str:
 
 
 def held_question_from_above(pick_label: str, gripper_side: str) -> str:
-    """The second image is from straight above where the grasp lifted, the tool upright: not the first
-    image's camera pose, which would roll the wrist with the object in hand (sim-scene 14:03)."""
+    """The second image is from where the grasp lifted, the tool upright: not the first image's camera
+    pose, which would roll the wrist with the object in hand (sim-scene 14:03)."""
     return (f"The first image was taken before the grasp, looking down at where the {pick_label} was lying. "
-            f"Between them the gripper went down, closed on the {pick_label} and lifted straight up; the second "
+            f"Between them the gripper went down, closed on the {pick_label} and lifted a little; the second "
             f"image is from the camera now, beside the gripper, looking down past its fingers, which are at "
             f"the {gripper_side} edge of the image. Is the {pick_label} gone from where it lay, so the gripper "
             f"is holding it? ok is false if the {pick_label} still lies where it was.")
