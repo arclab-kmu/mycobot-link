@@ -47,6 +47,7 @@ class DrawerSettings(Settings):
     finger_half_m: float = 0.028  # TCP to the outside of a finger, jaw open (45.6 mm gap + the finger)
     pad_floor_clear_m: float = 0.001  # pad tips above a drawer floor or the table at the grasp
     leave_mat_m: float = 0.12  # TCP over the table before leaving the handover mat for the cabinet
+    plan_buffer_m: float = 0.001  # extra hull clearance asked of a put planned before it is made
 
 
 def _add(a: Sequence[float], b: Sequence[float], s: float = 1.0) -> Vec:
@@ -243,11 +244,12 @@ class DrawerTask(PickPlace):
         d = fx.drawer(cmd["drawer"])
         look = self._open_and_look(d, None)
         occupied = [self._object_xyz(d, o, look["angles"]) for o in look["objects"]]
-        spot = fx.free_spot(d, fx.open_m, [p for p in occupied if p is not None], shape.width)
+        spot, margin = self._put_spot(d, [p for p in occupied if p is not None], shape, start)
         if spot is None:
             self._close(d)
-            return {"ok": False, "why": f"no room for a {desc} in {d.id}"}
-        self.log.event("spot", drawer=d.id, xyz=_r(spot, 4), occupied=[_r(p, 4) for p in occupied if p])
+            return {"ok": False, "why": f"no room the arm reaches for a {desc} in {d.id}"}
+        self.log.event("spot", drawer=d.id, xyz=_r(spot, 4), occupied=[_r(p, 4) for p in occupied if p],
+                       reach_margin_m=round(margin, 3))
         for attempt in range(1, self.s.attempts + 1):
             try:
                 self._pick_up(start, c.table_z, shape, desc, "table", jaw=self._put_yaw(start, spot, shape))
@@ -827,6 +829,9 @@ class DrawerTask(PickPlace):
             self._phase("descend")
             self._line((xyz[0], xyz[1], grasp_z), "descend", approach, jaw)
             self._gripper(c.gripper_closed, "close")
+            held = self._jaw_for_width(shape.width)
+            if held is not None:
+                self._jaw_open = held  # the pads stop on the object, not at the shut setpoint
             self._phase("lift")
             # Lift until the object's bottom (grasp_height under the TCP) clears the walls or the table,
             # by wall_clear_m where the arm reaches that high, else by 6 mm (sim-scene's figure).
@@ -930,7 +935,117 @@ class DrawerTask(PickPlace):
         self.log.event("carry", phase=phase, how="detour", why=f"no joint move: {why}; no line: {why_line}")
         self._goto(q, phase, floor=floor, speed=self.s.slow_speed)
 
-    def _put_yaw(self, start: Sequence[float], spot: Sequence[float], shape: Shape) -> Optional[Vec]:
+    def _put_heights(self, surface_z: float, shape: Shape, wall_top: Optional[float], clear: float) -> Tuple[float, float]:
+        """Where a put lets go (TCP z) and the lowest carry height over it, as :meth:`_put_down` has them."""
+        release_z = surface_z + shape.grasp_height + clear
+        return release_z, max(release_z, (wall_top or surface_z) + shape.grasp_height + self.s.wall_clear_m)
+
+    def _reaches(self, p: Sequence[float], z: float) -> bool:
+        """The TCP straight down at (``p``, ``z``) is within reach (J6 does not matter: the TCP is on its axis)."""
+        chain = self.calib.chain
+        for seed in (self._measured(), self.fx.cabinet_look_pose_deg, self.calib.look_pose_deg):
+            if not seed:
+                continue
+            try:
+                kinematics.solve_ik(chain, seed, (p[0], p[1], z), approach=DOWN)
+                return True
+            except IKError:
+                continue
+        return False
+
+    def _jaw_for_width(self, width: float) -> Optional[float]:
+        """How far open (0..1) the jaw is when it stops on something ``width`` wide."""
+        g = self.calib.jaw_gap
+        if not g or g[1] <= g[0]:
+            return None
+        return min(max((width - g[0]) / (g[1] - g[0]), 0.0), 1.0)
+
+    def _put_spot(self, d: Drawer, occupied: Sequence[Sequence[float]], shape: Shape,
+                  start: Optional[Sequence[float]] = None) -> Tuple[Optional[Vec], float]:
+        """Where to put an object in ``d``: a free floor point the arm reaches at the carry height, over it and
+        in front of the tray, and down to where it lets go, and whose whole put (in over the front panel,
+        down, let go, up, out) passes the checker as it will be made; the most room from the other objects
+        first (5 mm steps), then the most reach to spare above the carry height, then the middle. D3 v3.2
+        s461 (fc0e8d6): the roomiest spot, behind a sphere at the back-left of r2c0, was out of reach at
+        the height that clears the front panel; in D0 the spot beside an object brought the gripper body by
+        the handle two rows up, or the opened pads by the drawer's own handle (leader 15:49). (None, 0) if
+        no spot qualifies."""
+        release_z, least = self._put_heights(d.floor_z, shape, self._wall_top(d), self.s.drawer_clear_m)
+        cands = self.fx.free_spots(d, self.fx.open_m, occupied, shape.width)
+        bins: Dict[int, List[Tuple[Vec, float]]] = {}
+        for p, gap, mid in cands:
+            bins.setdefault(int(min(gap, 1.0) / 0.005), []).append((p, mid))
+        why = ""
+        for b in sorted(bins, reverse=True):
+            best: Optional[Tuple[float, float, Vec]] = None
+            for p, mid in bins[b]:
+                via = self._front_of(d, p, shape.width)
+                if not all(self._reaches(q, z) for q, z in ((p, least), (via, least), (p, (least + release_z) / 2),
+                                                             (p, release_z))):
+                    continue
+                spare = 0.0
+                for dz in (0.01, 0.02, 0.03, 0.04, 0.05):
+                    if self._reaches(p, least + dz) and self._reaches(via, least + dz):
+                        spare = dz
+                    else:
+                        break
+                if best is not None and (spare, -mid) <= (best[0], -best[1]):
+                    continue
+                if start is not None:
+                    blocked = self._put_blocked(d, p, via, shape, start, least, release_z)
+                    if blocked:
+                        why = blocked
+                        continue
+                best = (spare, mid, p)
+            if best is not None:
+                return best[2], best[0]
+        if why:
+            self.log.event("skip", why=f"no put spot in {d.id} whose put passes: {why}")
+        return None, 0.0
+
+    def _put_blocked(self, d: Drawer, spot: Vec, via: Vec, shape: Shape, start: Sequence[float], least: float,
+                     release_z: float) -> Optional[str]:
+        """Why the put at ``spot`` would be refused, planned as :meth:`_put_down` will make it after the grasp
+        on the table (:meth:`_put_yaw`): in at the carry height, down, let go, up, out; None if it passes."""
+        chain, c = self.calib.chain, self.calib
+        carry = next((z for z in (least + 0.03, least + 0.015, least)
+                      if self._reaches(spot, z) and self._reaches(via, z)), least)
+        jaw_mat = self._put_yaw(start, spot, shape, log=False)
+        try:
+            q_mat = kinematics.solve_ik(chain, c.look_pose_deg, (start[0], start[1], c.table_z + shape.grasp_height),
+                                        approach=DOWN, jaw=jaw_mat)
+            q_via = kinematics.solve_ik(chain, q_mat, (via[0], via[1], carry), approach=DOWN, hold=(6,))
+            # As _put_down: J6 held if the jaw lands within 10 deg of the pick jaw, else turned to it.
+            pick = self._jaw(d, spot)
+            jaw, hold = None, (6,)
+            if pick is not None:
+                there = kinematics.solve_ik(chain, q_via, (spot[0], spot[1], carry), approach=DOWN, hold=(6,))
+                x = kinematics.column(chain.pose(there, "tcp"), 0)
+                if math.degrees(math.acos(min(1.0, abs(kinematics.dot(x, pick))))) > 10.0:
+                    jaw, hold = pick, ()
+                    q_via = kinematics.solve_ik(chain, q_via, (via[0], via[1], carry), approach=DOWN, jaw=pick)
+            kw = dict(step_m=self.s.line_step_m, max_step=self.s.max_step, approach=DOWN, jaw=jaw, hold=hold)
+            inn = kinematics.line_path(chain, q_via, (spot[0], spot[1], carry), **kw)
+            down = kinematics.line_path(chain, inn[-1], (spot[0], spot[1], release_z), **kw)
+            up = kinematics.line_path(chain, down[-1], (spot[0], spot[1], carry), **kw)
+            out = kinematics.line_path(chain, up[-1], (via[0], via[1], carry), **kw)
+        except IKError as exc:
+            return f"IK: {exc}"
+        held, opened = self._jaw_for_width(shape.width), self._jaw_at(c.gripper_open)
+        # 1 mm more than the run itself is held to: the grasp's J6 and the spot drift a little from the
+        # prediction (D0, put r2c0 cube between two: 2.0 mm predicted, 1.9 run).
+        self._plan_buffer = self.s.plan_buffer_m
+        try:
+            for name, path, jaw_open in (("in", [q_via] + inn, held), ("down", [inn[-1]] + down, held),
+                                         ("up", [down[-1]] + up, opened), ("out", [up[-1]] + out, opened)):
+                why = self._path_clear(path, grasp_in=d.id, points=False, jaw=jaw_open)
+                if why is not None:
+                    return f"{name}: {why}"
+        finally:
+            self._plan_buffer = 0.0
+        return None
+
+    def _put_yaw(self, start: Sequence[float], spot: Sequence[float], shape: Shape, log: bool = True) -> Optional[Vec]:
         """The jaw to grip with on the table so that, carried with J6 held (no wrist roll with the object in
         hand), it arrives over ``spot`` along the calib's pick jaw: tried every 15 deg. None: the calib has no
         pick jaw, or nothing lands within 10 deg (the put then turns, slowly, in front of the tray)."""
@@ -952,8 +1067,9 @@ class DrawerTask(PickPlace):
             err = math.degrees(math.acos(min(1.0, abs(kinematics.dot(x, fx.pick_jaw)))))
             if err < best[0]:
                 best = (err, j)
-        self.log.event("put_yaw", deg_off_pick_jaw=None if best[1] is None else round(best[0], 1),
-                       jaw=None if best[1] is None else _r(best[1], 3))
+        if log:
+            self.log.event("put_yaw", deg_off_pick_jaw=None if best[1] is None else round(best[0], 1),
+                           jaw=None if best[1] is None else _r(best[1], 3))
         return best[1] if best[0] <= 10.0 else None
 
     def _leave_drawer(self, d: Drawer, shape: Shape) -> None:

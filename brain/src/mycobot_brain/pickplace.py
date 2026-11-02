@@ -139,6 +139,7 @@ class PickPlace:
         self._jaw_open: Optional[float] = None  # how far open the jaw was last commanded; None: not yet
         self._trail: Optional[List[List[float]]] = None  # waypoints sent since a mark, while one is kept
         self._holding = False  # an object is in the gripper (not a handle)
+        self._plan_buffer = 0.0  # added to the hull margin while checking a predicted (not yet sent) path
 
     # -- the sequence --------------------------------------------------------
 
@@ -499,7 +500,7 @@ class PickPlace:
         if why is not None:
             return why
         if robot.hulls:
-            hit = robot.hull_gaps(self.calib.chain, q, boxes, self.s.hull_margin_m, lambda name, box: (
+            hit = robot.hull_gaps(self.calib.chain, q, boxes, self.s.hull_margin_m + self._plan_buffer, lambda name, box: (
                 name in robot.fingers and (fingers_near == "all" or box in fingers_near)),
                 jaw=self._jaw_open if jaw == "now" else jaw)
             return None if hit is None else f"{hit[0]} {hit[2] * 1000:.1f} mm from the {hit[1]}"

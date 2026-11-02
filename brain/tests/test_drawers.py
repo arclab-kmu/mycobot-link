@@ -445,3 +445,27 @@ def test_a_put_grips_on_the_mat_at_the_yaw_that_arrives_along_the_pick_jaw(link,
     j6 = [e["angles_deg"][5] for e in carried if not e["phase"].startswith("lift: to")]
     assert max(j6) - min(j6) < 0.2, (min(j6), max(j6))
     assert world.objects["yellow_cone"]["drawer"] == "r2c0" and world.all_shut()
+
+
+def test_a_put_spot_is_one_the_arm_reaches_at_the_carry_height(tmp_path):
+    """D3 v3.2 s461 (fc0e8d6): beside a sphere at (0.187, 0.078) in r2c0 the roomiest spot was at the back
+    left, where straight down the arm reaches only under the height that clears r2c0's front panel. The
+    spot is now the roomiest one the arm reaches there, in front of the tray and down to the release."""
+    scene = cs.load_sim_like()
+    task = drawers.DrawerTask(None, None, scene, None, pickplace.RunLog(tmp_path / "t"), drawers.DrawerSettings())
+    task._measured = lambda: list(scene.fixture.cabinet_look_pose_deg)
+    d, cone = scene.fixture.drawers["r2c0"], scene.fixture.shapes["cone"]
+    sphere = [(0.187, 0.078, d.floor_z)]
+    release_z, least = task._put_heights(d.floor_z, cone, task._wall_top(d), task.s.drawer_clear_m)
+    roomiest = scene.fixture.free_spot(d, scene.fixture.open_m, sphere, cone.width)
+    assert not task._reaches(roomiest, least)  # the old choice
+    spot, spare = task._put_spot(d, sphere, cone)
+    assert spot is not None and task._reaches(spot, least) and task._reaches(spot, release_z)
+    assert task._reaches(task._front_of(d, spot, cone.width), least)
+    # The most room from the sphere among the spots the arm reaches (5 mm steps): with the sphere in the
+    # middle of a 72 mm tray none is a full cone's width away (2eb3e4c set this cone at the same spot).
+    gap = math.hypot(spot[0] - 0.187, spot[1] - 0.078)
+    for p, g, _ in scene.fixture.free_spots(d, scene.fixture.open_m, sphere, cone.width):
+        if task._reaches(p, least) and task._reaches(task._front_of(d, p, cone.width), least) \
+                and task._reaches(p, release_z):
+            assert g < gap + 0.005

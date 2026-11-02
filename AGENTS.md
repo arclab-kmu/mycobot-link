@@ -100,7 +100,8 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   read only by these. `tools/d3_collision_replay.py`: a run's commanded path
   through the brain's capsule check (sim-scene's hull audit is the one that
   scores). `brain/tests/d0_brain.py`: the brain-side D0 - every drawer x slot x
-  shape, take and put, planned against the fake arm/camera/VLM, no motion.
+  shape, take and put (puts also into drawers already holding objects at
+  the reset slots), planned against the fake arm/camera/VLM, no motion.
 
 ## Relation to other repos
 

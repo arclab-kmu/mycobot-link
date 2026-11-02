@@ -377,26 +377,31 @@ class Fixture:
         along, across = self.extent(d)
         return abs(dot(rel, a)) <= along / 2 - margin and abs(dot(rel, b)) <= across / 2 - margin
 
-    def free_spot(self, d: Drawer, opening: float, occupied: Sequence[Sequence[float]], width: float,
-                  margin: float = 0.006, grid: int = 7) -> Optional[Vec]:
-        """A floor point in the open part of the drawer for an object ``width`` wide,
-        as far as it can be from ``occupied`` (x, y) and the walls. None if it cannot fit."""
+    def free_spots(self, d: Drawer, opening: float, occupied: Sequence[Sequence[float]], width: float,
+                   margin: float = 0.006, grid: int = 7) -> List[Tuple[Vec, float, float]]:
+        """Floor points in the open part of the drawer for an object ``width`` wide, ``margin`` in from
+        the walls: (point, room to the nearest of ``occupied`` (inf without any), distance from the
+        middle). Empty if it cannot fit."""
         c, ha, hb = self.exposed(d, opening, margin + width / 2)
         if ha <= 0 or hb <= 0:
-            return None
+            return []
         a, b = self.axes()
-        best, best_score = None, -math.inf
+        out = []
         for i in range(grid):
             for j in range(grid):
                 sa = -ha + 2 * ha * i / (grid - 1)
                 sb = -hb + 2 * hb * j / (grid - 1)
                 p = (c[0] + sa * a[0] + sb * b[0], c[1] + sa * a[1] + sb * b[1], c[2])
                 gap = min((math.hypot(p[0] - o[0], p[1] - o[1]) for o in occupied), default=math.inf)
-                # Prefer room from the other objects; break ties towards the middle.
-                score = min(gap, 1.0) - 1e-3 * math.hypot(sa, sb)
-                if score > best_score:
-                    best, best_score = p, score
-        return best
+                out.append((p, gap, math.hypot(sa, sb)))
+        return out  # type: ignore[return-value]
+
+    def free_spot(self, d: Drawer, opening: float, occupied: Sequence[Sequence[float]], width: float,
+                  margin: float = 0.006, grid: int = 7) -> Optional[Vec]:
+        """The point of :meth:`free_spots` as far as it can be from ``occupied``; ties towards the middle."""
+        best = max(self.free_spots(d, opening, occupied, width, margin, grid),
+                   key=lambda s: min(s[1], 1.0) - 1e-3 * s[2], default=None)
+        return None if best is None else best[0]
 
     def in_handover(self, p: Sequence[float], margin: float = 0.0) -> bool:
         return (abs(p[0] - self.handover_center[0]) <= self.handover_size[0] / 2 - margin

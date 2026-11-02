@@ -63,9 +63,18 @@ def cases(calib_path: str):
                 out.append({"kind": "take", "drawer": did, "slot": slot, "shape": shape_name,
                             "object": {"colour": "yellow", "shape": shape_name, "drawer": did, "xy": xy, "z": z}})
             h = fx.handover_center
-            out.append({"kind": "put", "drawer": did, "slot": "handover centre", "shape": shape_name,
-                        "object": {"colour": "yellow", "shape": shape_name, "drawer": None, "xy": list(h),
-                                   "z": c.table_z + shape.height / 2}})
+            cube = fx.shapes.get("cube") or shape
+            for occ in ((), ("single",), ("pair0",), ("pair1",), ("pair0", "pair1")):
+                if any(o not in slots for o in occ):
+                    continue
+                # What the drawer already holds: red cubes at the reset slots (leader 15:49).
+                objs = {f"occ{i}": {"colour": "red", "shape": "cube", "drawer": did,
+                                    "xy": [slots[o][0] - open_m * a[0], slots[o][1] - open_m * a[1]],
+                                    "z": dr.floor_z + cube.height / 2} for i, o in enumerate(occ)}
+                out.append({"kind": "put", "drawer": did, "shape": shape_name,
+                            "slot": "handover centre" + (f", holding {'+'.join(occ)}" if occ else ""),
+                            "object": {"colour": "yellow", "shape": shape_name, "drawer": None, "xy": list(h),
+                                       "z": c.table_z + shape.height / 2}, "others": objs})
     return out
 
 
@@ -78,7 +87,7 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
     from mycobot_brain.camera import CameraLink
     from mycobot_brain.link import ArmLink
 
-    name = f"{case['kind']}_{case['drawer']}_{case['shape']}_{case['slot'].replace(' ', '-')}"
+    name = f"{case['kind']}_{case['drawer']}_{case['shape']}_{case['slot'].replace(' ', '-').replace(',', '')}"
     run_dir = Path(out_dir) / name
     run_dir.mkdir(parents=True, exist_ok=True)
     scene = calib.load(calib_path)
@@ -108,7 +117,7 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
         fake_cam = FakeCamera(cam.port).stream()
         cam.wait_connected(2.0)
         try:
-            world = cs.World(scene, {"obj": case["object"]})
+            world = cs.World(scene, {"obj": case["object"], **case.get("others", {})})
             world.angles = start
             vlm = cs.CabinetVLM(world, run_dir, commands={instruction: cmd}, order=[case["drawer"]])
             task = drawers.DrawerTask(link, cam, scene, vlm, pickplace.RunLog(run_dir),
@@ -135,8 +144,9 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
             rec.update(slow_turns=[e.get("deg") for e in ev if e["event"] == "slow_turn"],
                        put_yaw_deg=next((e.get("deg_off_pick_jaw") for e in ev if e["event"] == "put_yaw"), None),
                        held_j6_range_deg=round(max(j6) - min(j6), 2) if j6 else None)
+            others_moved = [k for k in case.get("others", {}) if world.moved(k)]
             rec.update(ok=result.get("ok"), why=result.get("why"), object_where_wanted=where_ok,
-                       all_shut=world.all_shut(), seconds=round(time.monotonic() - t0, 1),
+                       all_shut=world.all_shut(), others_moved=others_moved, seconds=round(time.monotonic() - t0, 1),
                        taught_checks=[e["why"] for e in ev if e["event"] == "taught_check"],
                        detours=[e.get("how") for e in ev if e["event"] == "detour"],
                        moves=sum(1 for e in ev if e["event"] == "move"))
@@ -145,7 +155,7 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
             fake_cam.close()
             arm.close()
     why = rec.get("why") or ""
-    if rec.get("ok") and rec["object_where_wanted"] and rec["all_shut"]:
+    if rec.get("ok") and rec["object_where_wanted"] and rec["all_shut"] and not rec.get("others_moved"):
         rec["outcome"] = "planned"
     elif any(w in why for w in ("PathBlocked", "no clear way", "would put", "IK", "out of reach", "no grasp")):
         rec["outcome"] = "refused"

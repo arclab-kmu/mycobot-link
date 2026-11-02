@@ -37,6 +37,8 @@ class Calib:
     gripper_closed: int
     #: how far the finger pads reach past the TCP along the approach axis.
     pad_below_tcp: float = 0.0
+    #: the jaw's gap shut and fully open (m); with it the pads holding an object sit at its width
+    jaw_gap: Optional[Sequence[float]] = None
     source: str = ""
     fixture: Optional[fixture_mod.Fixture] = None
     #: the arm's links as capsules (calib v3 ``robot_collision``); None: only the TCP and camera are checked.
@@ -161,6 +163,8 @@ def from_dict(d: Dict[str, Any], source: str = "") -> Calib:
             gripper_open=int(_need(gripper, "open", "open_value")),
             gripper_closed=int(_need(gripper, "closed", "closed_value")),
             pad_below_tcp=float(max(pads)) if pads else 0.0,
+            jaw_gap=(lambda g: None if not g else (float(g["closed"]), float(g["open"])))(
+                (d.get("tcp") or {}).get("jaw_gap_m")),
             source=source,
             fixture=fix,
             robot=robot,
