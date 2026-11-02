@@ -27,8 +27,8 @@ sim() { $SIM_SSH "printf '%s\n' '$1' | nc -q1 127.0.0.1 47950"; }
 
 mkdir -p "$DIR"
 echo "== $RUN"
-printf '{"run": "%s", "seed": %s, "layout": "%s", "instruction": "%s", "drawer": "%s"}\n' \
-  "$RUN" "$SEED" "$LAYOUT" "$INSTRUCTION" "$DRAWER" >"$DIR/meta.json"
+printf '{"run": "%s", "seed": %s, "layout": "%s", "instruction": "%s", "drawer": "%s", "brain_args": "%s"}\n' \
+  "$RUN" "$SEED" "$LAYOUT" "$INSTRUCTION" "$DRAWER" "${BRAIN_ARGS:-}" >"$DIR/meta.json"
 if [ "$LAYOUT" = find ]; then
   sim "{\"op\":\"reset\",\"seed\":$SEED}"
 else
@@ -37,8 +37,11 @@ fi
 sleep 3  # the reset puts the arm at the cabinet look pose; let the objects settle
 sim '{"op":"truth"}' >"$DIR/truth_before.json"
 sim "{\"op\":\"record\",\"on\":true,\"run\":\"$RUN\"}"
+# BRAIN_ARGS: extra drawer options, e.g. longer wall-clock waits when the bridge runs slower than real
+# time (2026-11-02: ~0.7x with the new grip physics).
+# shellcheck disable=SC2086
 (cd "$(dirname "$0")/../brain" && "$UV" run mycobot-brain drawer "$INSTRUCTION" \
-  --calib "$CALIB" --execute --record "$DIR") >"$DIR/cli.log" 2>&1
+  --calib "$CALIB" --execute --record "$DIR" ${BRAIN_ARGS:-}) >"$DIR/cli.log" 2>&1
 echo "exit $?" | tee -a "$DIR/cli.log"
 sleep 1.5  # objects at rest before they are scored
 sim '{"op":"truth"}' | tee "$DIR/truth.json" >/dev/null
