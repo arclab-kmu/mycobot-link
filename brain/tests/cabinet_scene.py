@@ -173,15 +173,6 @@ class World:
         elif value >= 50 and self.grip is not None:
             if self.grip[0] == "object":
                 self._drop(self.grip[1])
-            else:
-                # Let go of a handle within 5 mm of a stage's end: the drawer is there, as sim-scene's D1
-                # measured the taught pulls (99.1-100 mm); following the TCP alone left r0c1's two-stage
-                # pull 3.6 mm short, a front panel the sim does not have.
-                d_id = self.grip[1]
-                ends = {0.0, self.fx.open_m} | {e for st in self.fx.stages(self.fx.drawers[d_id]) for e in (st.from_m, st.to_m)}
-                end = min(ends, key=lambda x: abs(self.opening[d_id] - x))
-                if abs(self.opening[d_id] - end) < 0.005:
-                    self.opening[d_id] = end
             self.grip = None
 
     def _drop(self, oid):

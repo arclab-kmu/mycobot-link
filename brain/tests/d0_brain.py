@@ -155,6 +155,10 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
                        guard_refused=any(m in str(result.get("why")) for m in marks))
             others_moved = [k for k in case.get("others", {}) if world.moved(k)]
             rec["world_faults"] = world.faults[:20]
+            # Leader 21:36/21:37: in-drawer picks that needed a turned jaw, the openings as measured, the tidy-up.
+            rec.update(jaw_turns=[e.get("deg") for e in ev if e["event"] == "jaw_turn"],
+                       openings=[[e["drawer"], e["measured_m"]] for e in ev if e["event"] == "opening"],
+                       tidy=[e.get("step") for e in ev if e["event"] == "tidy"])
             rec.update(ok=result.get("ok"), why=result.get("why"), object_where_wanted=where_ok,
                        all_shut=world.all_shut(), others_moved=others_moved, seconds=round(time.monotonic() - t0, 1),
                        taught_checks=[e["why"] for e in ev if e["event"] == "taught_check"],

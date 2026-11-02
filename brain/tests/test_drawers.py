@@ -519,3 +519,37 @@ def test_the_brain_keeps_off_what_it_set_down(tmp_path):
     assert box[0] == inside and box[1][0] == pytest.approx(0.2 + fx.open_m)  # pushed in along +x
     assert box[3] == pytest.approx(cone.width / 2)  # an upright cylinder of its catalogue radius
     assert task._known_boxes({d.id: 0.0}, moving=d.id) == []
+
+
+def test_a_refused_pick_ends_with_every_drawer_shut_at_the_cabinet_look(link, camera, teleporting, tmp_path,
+                                                                         monkeypatch):
+    """D3 v3.3 s501 (32574dc): the brain refused its descent onto the cone and the run ended with r2c2 out
+    10 cm. A refusal or failure now ends tidy: every drawer this run opened shut, the arm at the cabinet
+    look, ok=false with the reason (leader 21:36)."""
+    monkeypatch.setattr(drawers.DrawerTask, "_descent_blocked", lambda self, *a, **k: "a made-up pad on a wall")
+    result, world, _ = run(link, camera, teleporting, tmp_path, order=["r1c2"])
+    assert result["ok"] is False and "turned up to 90 deg" in result["why"], result
+    assert result["drawers_opened"] == ["r1c2"] and world.all_shut()
+    moves = [e for e in events(tmp_path) if e["event"] == "move"]
+    assert moves[-1]["phase"] == "cabinet look"
+    assert not any(world.moved(o) for o in OBJECTS)
+
+
+def test_a_pick_refused_at_the_pick_jaw_turns_the_jaw(link, camera, teleporting, tmp_path, monkeypatch):
+    """Leader 21:36: in a drawer, a descent refused at the calib's pick jaw is tried with the jaw turned
+    15 deg at a time either way up to 90 (nothing is held yet, so the turn is free), and logged."""
+    calls = []
+
+    def blocked(self, xyz, above, grasp_z, approach, jaw):
+        calls.append(jaw)
+        return "a made-up pad on the front" if len(calls) == 1 else None
+
+    monkeypatch.setattr(drawers.DrawerTask, "_descent_blocked", blocked)
+    result, world, _ = run(link, camera, teleporting, tmp_path, order=["r1c2"])
+    assert result["ok"] is True, result
+    assert world.in_handover("yellow_cone") and world.all_shut()
+    turns = [e for e in events(tmp_path) if e["event"] == "jaw_turn"]
+    assert len(turns) == 1 and turns[0]["deg"] == 15 and "made-up pad" in turns[0]["why"]
+    first, second = calls[0], calls[1]
+    assert math.degrees(math.acos(max(-1.0, min(1.0, abs(first[0] * second[0] + first[1] * second[1]))))) \
+        == pytest.approx(15.0, abs=1e-6)

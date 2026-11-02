@@ -140,6 +140,9 @@ def test_a_find_plays_the_taught_open_close_and_view_routes(link, camera, telepo
     pulled = [e["angles_deg"] for e in ev if e["event"] == "move" and e["phase"] == "open r2c1"]
     assert pulled == [pytest.approx(list(q), abs=0.01) for q in next(s for s in t.open if s.phase == "pull").leg.q]
     assert not any(e["event"] == "skip" and "not a taught sequence" in e["why"] for e in ev)
+    # Where the drawer is comes from the hand's measured travel while it held the handle (leader 21:37).
+    opened = [e for e in ev if e["event"] == "opening"]
+    assert [round(e["measured_m"], 3) for e in opened] == [0.1, 0.0] and [e["calib_m"] for e in opened] == [0.1, 0.0]
 
 
 def test_one_way_taught_routes_are_chained(tmp_path):
