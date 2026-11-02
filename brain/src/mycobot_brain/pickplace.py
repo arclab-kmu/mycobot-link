@@ -83,6 +83,11 @@ class Settings:
     coords: str = "norm1000"
     shape: str = "bbox"
     refine: bool = True
+    #: holding an object, a straight line goes as one joint move when its TCP stays this close to the line
+    #: (and the tool within held_tilt_deg of the approach): 1 cm IK steps stop and go, and a cone on its
+    #: skirt slid out of the pads on them (D3 v3.2 s502_b, 6c9a9e2; 788cb77)
+    held_line_tol_m: float = 0.003
+    held_tilt_deg: float = 5.0
     robot_margin_m: float = 0.005  # the arm's capsules apart from each other and from the scene
     #: the hand bodies off the scene while they grasp (handle grip/pull/push, in-drawer pick/place):
     #: sim-scene checks those phases at 2 mm, and the brain uses the same rule (leader 2026-11-02)
@@ -133,6 +138,7 @@ class PickPlace:
         self._seq: Optional[int] = None
         self._jaw_open: Optional[float] = None  # how far open the jaw was last commanded; None: not yet
         self._trail: Optional[List[List[float]]] = None  # waypoints sent since a mark, while one is kept
+        self._holding = False  # an object is in the gripper (not a handle)
 
     # -- the sequence --------------------------------------------------------
 
@@ -356,10 +362,16 @@ class PickPlace:
             raise LinkError("lost the joint reading")
         return list(state["angles_deg"])
 
+    def _held(self, jaw: Optional[Vec]) -> Tuple[int, ...]:
+        """Joints IK keeps where they are: holding an object with the jaw free, J6 - a wrist roll with an
+        object in hand let a cone slip from an off-centre grip (sim-scene 14:03, leader 14:04)."""
+        return (6,) if self._holding and jaw is None else ()
+
     def _ik(self, seed: Sequence[float], tcp: Sequence[float], approach: Vec = DOWN,
             jaw: Optional[Vec] = None) -> List[float]:
         try:
-            return kinematics.solve_ik(self.calib.chain, seed, tcp, tool="tcp", approach=approach, jaw=jaw)
+            return kinematics.solve_ik(self.calib.chain, seed, tcp, tool="tcp", approach=approach, jaw=jaw,
+                                       hold=self._held(jaw))
         except IKError as exc:
             raise PickPlaceError(str(exc)) from exc
 
@@ -422,6 +434,38 @@ class PickPlace:
         self._check_path([here] + path, phase)
         self._send(path, phase, speed or self.s.speed)
 
+    def _held_joint_line(self, here: Sequence[float], goal: Sequence[float], phase: str, approach: Vec,
+                         jaw: Optional[Vec], speed: int) -> bool:
+        """Holding an object, send the straight line to ``goal`` as one joint move instead, when that move
+        keeps the TCP within ``held_line_tol_m`` of the line, the tool within ``held_tilt_deg`` of
+        ``approach``, and passes the checker. Whether it went."""
+        chain = self.calib.chain
+        try:
+            q = kinematics.solve_ik(chain, here, goal, tool="tcp", approach=approach, jaw=jaw, hold=self._held(jaw))
+        except IKError:
+            return False
+        path = kinematics.joint_path(here, q, self.s.max_step)
+        a = kinematics.position(chain.pose(here, "tcp"))
+        ab = [g - x for g, x in zip(goal, a)]
+        n2 = sum(v * v for v in ab) or 1e-12
+        cos_tilt = math.cos(math.radians(self.s.held_tilt_deg))
+        for p_q in collision.densify([here] + path, self.s.check_step_deg):
+            t = chain.pose(p_q, "tcp")
+            p = kinematics.position(t)
+            u = max(0.0, min(1.0, sum((x - y) * v for x, y, v in zip(p, a, ab)) / n2))
+            off = math.dist(p, [y + u * v for y, v in zip(a, ab)])
+            if off > self.s.held_line_tol_m or kinematics.dot(kinematics.column(t, 2), approach) < cos_tilt:
+                return False
+        if self._why_blocked([here] + path, line=True) is not None:
+            return False
+        self.log.event("held_move", phase=phase, how="one joint move for the line", waypoints=len(path))
+        self._send(path, phase, speed)
+        return True
+
+    def _why_blocked(self, path: Sequence[Sequence[float]], line: bool = False) -> Optional[str]:
+        """What :meth:`_check_path` would refuse ``path`` for, without raising."""
+        return self._path_clear(path)
+
     def _check_path(self, path: Sequence[Sequence[float]], phase: str, line: bool = False) -> None:
         """Raise if a path (from where the arm is) runs the arm into itself or the scene; ``line``: a
         straight line of the TCP (descend, lift, pull), not a joint move."""
@@ -476,10 +520,13 @@ class PickPlace:
     def _line(self, goal: Sequence[float], phase: str, approach: Optional[Vec] = DOWN, jaw: Optional[Vec] = None,
               speed: Optional[int] = None, approach_end: Optional[Vec] = None, either_jaw: bool = True) -> None:
         here = self._measured()
+        if self._holding and approach is not None and approach_end is None and \
+                self._held_joint_line(here, goal, phase, approach, jaw, speed or self.s.slow_speed):
+            return
         try:
             path = kinematics.line_path(self.calib.chain, here, goal, step_m=self.s.line_step_m,
                                         max_step=self.s.max_step, approach=approach, jaw=jaw,
-                                        approach_end=approach_end, either_jaw=either_jaw)
+                                        approach_end=approach_end, either_jaw=either_jaw, hold=self._held(jaw))
         except IKError as exc:
             raise PickPlaceError(f"{phase}: {exc}") from exc
         self._check_path([here] + path, phase, line=True)
@@ -519,8 +566,10 @@ class PickPlace:
         o, c = self.calib.gripper_open, self.calib.gripper_closed
         return min(max((value - c) / (o - c), 0.0), 1.0) if o != c else None
 
-    def _gripper(self, value: int, action: str) -> None:
+    def _gripper(self, value: int, action: str, holds: Optional[bool] = None) -> None:
+        """``holds``: whether this closes on an object to carry (default: a close does); a handle is not."""
         self._jaw_open = self._jaw_at(value)
+        self._holding = (action == "close") if holds is None else holds
         self.link.gripper(value, self.s.gripper_speed)
         self.log.event("gripper", action=action, value=value)
         time.sleep(self.s.gripper_wait)

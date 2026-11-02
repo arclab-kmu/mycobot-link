@@ -250,7 +250,7 @@ class DrawerTask(PickPlace):
         self.log.event("spot", drawer=d.id, xyz=_r(spot, 4), occupied=[_r(p, 4) for p in occupied if p])
         for attempt in range(1, self.s.attempts + 1):
             try:
-                self._pick_up(start, c.table_z, shape, desc, "table")
+                self._pick_up(start, c.table_z, shape, desc, "table", jaw=self._put_yaw(start, spot, shape))
                 break
             except NotHeld:
                 if attempt == self.s.attempts:
@@ -492,7 +492,7 @@ class DrawerTask(PickPlace):
         with self._near(skip=d.id, at_handle=True):
             either = not stage.exact_jaw
             self._line(fx.stage_tcp(stage, start), f"{tag}: to handle", a, j, either_jaw=either)
-            self._gripper(stage.close if stage.close is not None else c.gripper_closed, "close")
+            self._gripper(stage.close if stage.close is not None else c.gripper_closed, "close", holds=False)
             with self._near(moving=d.id):
                 self._line(fx.stage_tcp(stage, end), tag, None if plan.free else a, j, speed=self.s.handle_speed,
                            approach_end=None if plan.free else a_end, either_jaw=either)
@@ -518,7 +518,7 @@ class DrawerTask(PickPlace):
         for i, seg in enumerate(segs):
             tag = f"{verb} {d.id}" + (f" ({seg.stage + 1}/{n})" if n > 1 and seg.stage is not None else "")
             if seg.gripper is not None:
-                self._gripper(seg.gripper, "close" if seg.phase == "pull" else "open")
+                self._gripper(seg.gripper, "close" if seg.phase == "pull" else "open", holds=False)
             label, ctx = {"standoff": (f"{tag}: pre-grasp", {}),
                           "approach": (f"{tag}: to handle", dict(skip=d.id, at_handle=True)),
                           "pull": (tag, dict(skip=d.id, at_handle=True, moving=d.id)),
@@ -762,7 +762,7 @@ class DrawerTask(PickPlace):
 
     def _pick_up(self, xyz: Vec, surface_z: float, shape: Shape, desc: str, where: str,
                  wall_top: Optional[float] = None, drawer: Optional[Drawer] = None,
-                 others: Sequence[Sequence[float]] = ()) -> None:
+                 others: Sequence[Sequence[float]] = (), jaw: Optional[Vec] = None) -> None:
         """Close look and refine, then down, close, up, and the VLM says whether it is held."""
         s, c = self.s, self.calib
         plane = surface_z + shape.height / 2
@@ -803,7 +803,7 @@ class DrawerTask(PickPlace):
             above = (xyz[0], xyz[1], max(clear, surface_z + self.fx.pick_above_m))
         else:
             above = (xyz[0], xyz[1], max(clear, grasp_z + 0.03) + s.pregrasp_m / 2)
-        jaw = self._jaw(drawer, xyz, others)
+        jaw = jaw if jaw is not None else self._jaw(drawer, xyz, others)
         approach = DOWN if jaw is not None else self._approach(above, (xyz[0], xyz[1], grasp_z), "grasp")
         # The fingers go down among this drawer's walls (or to the table) and come up again: the pad-tip
         # rule above holds them off the floor, the capsules are too coarse for it (calib v3).
@@ -837,15 +837,21 @@ class DrawerTask(PickPlace):
             self._trail = [list(self._lifted)]  # the way up to the held check's view, to retrace
             self._phase("check held")
             if view is not None:
-                # Up to the view's height first, then turn: the way down in reverse (see pre-grasp).
+                # Straight up to the close look's height (or as high as the arm reaches there), the tool as
+                # it gripped: no wrist roll or tilt with the object in hand (sim-scene 14:03: the close
+                # look's own pose rolled J6 82 -> 47 -> 82 and an off-centre cone crept out; leader 14:04).
                 view_z = kinematics.position(c.chain.pose(view, "tcp"))[2]
                 if view_z > lift + 0.005:
                     try:
-                        self._line((xyz[0], xyz[1], view_z), "lift: to the look", approach, jaw)
-                    except PickPlaceError as exc:
-                        self.log.event("skip", why=f"no straight lift to the look: {exc}")
-                self._goto(view, "look: held", floor=None, speed=s.slow_speed)
-                question = grounding.held_question_same_view(desc, self._gripper_side())
+                        up_z = self._reachable_z(xyz, [view_z, (view_z + lift) / 2], approach, jaw)
+                    except PickPlaceError:
+                        up_z = lift
+                    if up_z > lift + 0.005:
+                        try:
+                            self._line((xyz[0], xyz[1], up_z), "lift: to the look", approach, jaw)
+                        except PickPlaceError as exc:
+                            self.log.event("skip", why=f"no straight lift to the look: {exc}")
+                question = grounding.held_question_from_above(desc, self._gripper_side())
                 images = [("Before the grasp:", before)]
             else:
                 question, images = grounding.held_question(desc), []
@@ -880,10 +886,25 @@ class DrawerTask(PickPlace):
         # between the tray's front and back walls), turned to in front of the tray; the yaw left over from
         # the table pick put the gripper body by the handles above (D3 v3.2 D0, put r0c0).
         jaw = None if drawer is None else self._jaw(drawer, xyz)
+        off = 0.0
+        if jaw is not None:
+            # Gripped on the mat at the yaw that lands here (:meth:`_put_yaw`): if over the spot, J6 held,
+            # the jaw is within 10 deg of the pick jaw, go on as it is; else turn, slowly, the one wrist roll
+            # with an object in hand (logged, counted by D0).
+            try:
+                there = kinematics.solve_ik(c.chain, self._measured(), (xyz[0], xyz[1], carry), approach=DOWN,
+                                            hold=(6,))
+                x = kinematics.column(c.chain.pose(there, "tcp"), 0)
+                off = math.degrees(math.acos(min(1.0, abs(kinematics.dot(x, jaw)))))
+            except IKError:
+                off = 90.0
+            if off <= 10.0:
+                jaw = None
         with self._near(**self._grasping(drawer)):
             if via is not None:
                 if jaw is not None:
-                    self._line((via[0], via[1], carry), f"carry: {where}: turn", DOWN, jaw)
+                    self.log.event("slow_turn", where=where, deg=round(off, 1))
+                    self._line((via[0], via[1], carry), f"carry: {where}: turn", DOWN, jaw, speed=5)
                 self._line((xyz[0], xyz[1], carry), f"carry: {where}", DOWN, jaw)
             self._phase(f"lower: {where}")
             self._line((xyz[0], xyz[1], release_z), f"lower: {where}", DOWN, jaw)
@@ -920,6 +941,32 @@ class DrawerTask(PickPlace):
         self.log.event("carry", phase=phase, how="detour", why=f"no joint move: {why}; no line: {why_line}")
         self._goto(q, phase, floor=floor, speed=self.s.slow_speed)
 
+    def _put_yaw(self, start: Sequence[float], spot: Sequence[float], shape: Shape) -> Optional[Vec]:
+        """The jaw to grip with on the table so that, carried with J6 held (no wrist roll with the object in
+        hand), it arrives over ``spot`` along the calib's pick jaw: tried every 15 deg. None: the calib has no
+        pick jaw, or nothing lands within 10 deg (the put then turns, slowly, in front of the tray)."""
+        fx, chain = self.fx, self.calib.chain
+        if fx.pick_jaw is None:
+            return None
+        grasp = (start[0], start[1], self.calib.table_z + shape.grasp_height)
+        target = (spot[0], spot[1], spot[2] + shape.grasp_height + 0.03)
+        best: Tuple[float, Optional[Vec]] = (math.inf, None)
+        for k in range(12):
+            a = math.radians(15 * k)
+            j = (math.cos(a), math.sin(a), 0.0)
+            try:
+                q = kinematics.solve_ik(chain, self.calib.look_pose_deg, grasp, approach=DOWN, jaw=j)
+                there = kinematics.solve_ik(chain, q, target, approach=DOWN, hold=(6,))
+            except IKError:
+                continue
+            x = kinematics.column(chain.pose(there, "tcp"), 0)
+            err = math.degrees(math.acos(min(1.0, abs(kinematics.dot(x, fx.pick_jaw)))))
+            if err < best[0]:
+                best = (err, j)
+        self.log.event("put_yaw", deg_off_pick_jaw=None if best[1] is None else round(best[0], 1),
+                       jaw=None if best[1] is None else _r(best[1], 3))
+        return best[1] if best[0] <= 10.0 else None
+
     def _leave_drawer(self, d: Drawer, shape: Shape) -> None:
         """With an object out of ``d``: back down to where the grasp lifted, the way the arm came up to the
         held check's view; up until it clears the walls; then straight out past the front.
@@ -929,17 +976,32 @@ class DrawerTask(PickPlace):
         move down to the line's height put the gripper 0.7 mm from the cabinet face. The way up was
         checked on the way up."""
         back, self._back = self._back, None
-        if back and len(back) > 1 and max(abs(a - b) for a, b in zip(self._measured(), back[-1])) <= 3.0:
-            path = [list(q) for q in reversed(back[:-1])]
-            with self._near(grasp_in=d.id):
-                self._check_path([self._measured()] + path, f"out of {d.id}: back to the lift")
-                self._send(path, f"out of {d.id}: back to the lift", self.s.slow_speed)
         top = self._wall_top(d) + shape.grasp_height
+        if back and len(back) > 1 and max(abs(a - b) for a, b in zip(self._measured(), back[-1])) <= 3.0:
+            lift_z = kinematics.position(self.calib.chain.pose(back[0], "tcp"))[2]
+            with self._near(grasp_in=d.id):
+                # One joint move back down to the lift pose (leader 13:46: smooth while holding); else the
+                # way up, reversed.
+                if not self._held_joint(back[0], f"out of {d.id}: back to the lift", floor=min(lift_z, top + 0.006)):
+                    path = [list(q) for q in reversed(back[:-1])]
+                    self._check_path([self._measured()] + path, f"out of {d.id}: back to the lift")
+                    self._send(path, f"out of {d.id}: back to the lift", self.s.slow_speed)
         here = kinematics.position(self.calib.chain.pose(self._measured(), "tcp"))
         via = self._front_of(d, here, shape.width)
         z = self._reachable_z([here, via], [top + self.s.wall_clear_m, top + 0.006], DOWN, None)
         self._phase(f"out of {d.id}")
         with self._near(grasp_in=d.id):
+            # One joint move out in front of the tray at this height, the object over the walls and the
+            # front panel all the way (leader 13:46: smooth moves while holding); else the line below.
+            # Low in front of r0c1 that move folds the arm against itself (joint3 on joint5): higher, as
+            # far as the arm reaches, before the line.
+            for dz in (0.0, 0.03, 0.06, 0.09):
+                try:
+                    q_via = self._ik(self._measured(), (via[0], via[1], max(z, here[2]) + dz), DOWN)
+                except PickPlaceError:
+                    continue
+                if self._held_joint(q_via, f"out of {d.id}", floor=top + 0.006):
+                    return
             # Low in front of a bottom-row tray the line out folds the arm against itself (r0c1: joint3 on
             # joint5, D3 v3.2 D0): higher, if the arm reaches, before giving up on the line.
             for dz in (0.03, 0.06, 0.09):
@@ -1125,6 +1187,23 @@ class DrawerTask(PickPlace):
         chain = self.calib.chain
         low = min(kinematics.position(chain.pose(q, "tcp"))[2] for q in collision.densify(path, self.s.check_step_deg))
         return f"TCP down to z={low:.3f} (floor {floor:.3f})" if low < floor - 1e-3 else None
+
+    def _why_blocked(self, path: Sequence[Sequence[float]], line: bool = False) -> Optional[str]:
+        return self._path_clear(path, points=not line, **self._ctx)
+
+    def _held_joint(self, goal: Sequence[float], phase: str, floor: float, speed: Optional[int] = None) -> bool:
+        """Holding an object, one joint move to ``goal`` (angles) when it passes the checker and keeps the TCP
+        over ``floor`` - smooth, where chains of 1 cm line steps shook a cone out of the pads (D3 v3.2
+        s502_b). Whether it went."""
+        here = self._measured()
+        path = kinematics.joint_path(here, goal, self.s.max_step)
+        why = self._why_blocked([here] + path) or self._dips([here] + path, floor)
+        if why is not None:
+            self.log.event("skip", why=f"{phase}: no single joint move: {why}")
+            return False
+        self.log.event("held_move", phase=phase, how="one joint move", waypoints=len(path))
+        self._send(path, phase, speed or self.s.slow_speed)
+        return True
 
     def _check_path(self, path: Sequence[Sequence[float]], phase: str, line: bool = False) -> None:
         why = self._path_clear(path, points=not line, **self._ctx)

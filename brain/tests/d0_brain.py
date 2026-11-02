@@ -122,6 +122,19 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
             where_ok = world.in_handover("obj") if case["kind"] == "take" else (
                 o["drawer"] == case["drawer"] and not o["held"])
             ev = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+            # J6 while an object is held: from the close after "descend" to the next open
+            j6, held, after_descend = [], False, False
+            for e in ev:
+                if e["event"] == "phase":
+                    after_descend = e["name"] == "descend" or (after_descend and not held)
+                if e["event"] == "gripper":
+                    held = e["action"] == "close" and after_descend
+                    after_descend = False
+                if held and e["event"] == "move":
+                    j6.append(e["angles_deg"][5])
+            rec.update(slow_turns=[e.get("deg") for e in ev if e["event"] == "slow_turn"],
+                       put_yaw_deg=next((e.get("deg_off_pick_jaw") for e in ev if e["event"] == "put_yaw"), None),
+                       held_j6_range_deg=round(max(j6) - min(j6), 2) if j6 else None)
             rec.update(ok=result.get("ok"), why=result.get("why"), object_where_wanted=where_ok,
                        all_shut=world.all_shut(), seconds=round(time.monotonic() - t0, 1),
                        taught_checks=[e["why"] for e in ev if e["event"] == "taught_check"],

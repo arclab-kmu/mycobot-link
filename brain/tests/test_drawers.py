@@ -376,21 +376,72 @@ def test_a_drawer_the_calib_takes_out_of_use_is_never_opened(link, camera, telep
     assert result["ok"] is False and "r0c0 is not in use" in result["why"] and result["drawers_opened"] == []
 
 
-def test_out_of_a_drawer_goes_back_down_the_way_up_to_the_held_check_first(link, camera, teleporting, tmp_path,
-                                                                           monkeypatch):
-    """D3 v3.2 run 1 (s502, f0f49be): leaving r0c0 from its top-down view (the held check's), over the
-    cabinet edge, the line out took a folding elbow branch and the joint move down came 0.7 mm from the
-    cabinet face. Now the arm first retraces the waypoints it went up by, then leaves at the lift height."""
+def test_out_of_a_drawer_goes_back_down_to_the_lift_first(link, camera, teleporting, tmp_path, monkeypatch):
+    """D3 v3.2 run 1 (s502, f0f49be): leaving r0c0 from its top-down view, over the cabinet edge, the line
+    out took a folding elbow branch and the joint move down came 0.7 mm from the cabinet face. Now the arm
+    first goes back down to where the grasp lifted, then leaves at the lift height."""
     monkeypatch.setattr(cs, "load", cs.load_sim_like)
     objects = {"yellow_cone": dict(SIM_OBJECTS["yellow_cone"], drawer="r2c2", xy=[0.289, -0.0985])}
     result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r2c2"])
     assert result["ok"] is True, result
     ev = [e for e in events(tmp_path) if e["event"] == "move"]
     phases = [e["phase"] for e in ev]
-    i_lift = max(i for i, p in enumerate(phases) if p == "lift")
-    up = [e["angles_deg"] for e in ev[i_lift + 1:] if e["phase"] in ("lift: to the look", "look: held")]
-    down = [e["angles_deg"] for e in ev if e["phase"] == "out of r2c2: back to the lift"]
-    assert up and down == list(reversed([ev[i_lift]["angles_deg"]] + up[:-1]))
-    first_out = phases.index("out of r2c2")
-    assert phases.index("out of r2c2: back to the lift") < first_out
+    lifted = [e for e in ev if e["phase"] == "lift"][-1]["angles_deg"]
+    # Where the line out starts: back at the lift pose (retraced, if the held check rose above it).
+    before_out = ev[phases.index("out of r2c2") - 1]["angles_deg"]
+    assert before_out == pytest.approx(lifted, abs=0.05)
     assert world.in_handover("yellow_cone") and world.all_shut()
+
+
+def _between_grasp_and_release(ev):
+    """The moves while an object is held: from the gripper's close on it to the next open."""
+    out, holding = [], False
+    for e in ev:
+        if e["event"] == "gripper":
+            holding = e["action"] == "close" and e["value"] == 0 and not e.get("handle")
+        if holding and e["event"] == "move":
+            out.append(e)
+    return out
+
+
+def test_holding_an_object_the_wrist_does_not_roll_and_moves_go_smooth(link, camera, teleporting, tmp_path,
+                                                                       monkeypatch):
+    """sim-scene 14:03 / leader 14:04: a cone gripped a little off centre crept out of the pads when the held
+    check's view rolled J6 82 -> 47 -> 82 with it in hand. From the grasp to the release J6 stays put; the
+    held check looks from straight above; the way down and out go as one joint move each where they pass."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    objects = {"yellow_cone": dict(SIM_OBJECTS["yellow_cone"], drawer="r2c2", xy=[0.289, -0.0985])}
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects=objects, order=["r2c2"])
+    assert result["ok"] is True, result
+    ev = events(tmp_path)
+    held = [e for e in ev if e["event"] == "move" and e["phase"] in (
+        "lift", "lift: to the look", "out of r2c2: back to the lift", "out of r2c2", "carry: handover",
+        "lower: handover")]
+    j6 = {round(e["angles_deg"][5], 1) for e in held}
+    assert max(j6) - min(j6) < 0.2, j6
+    assert not any(e["event"] == "move" and e["phase"] == "look: held" for e in ev)
+    assert "out of r2c2" in {e["phase"] for e in ev if e["event"] == "held_move"}
+    assert world.in_handover("yellow_cone") and world.all_shut()
+
+
+def test_a_put_grips_on_the_mat_at_the_yaw_that_arrives_along_the_pick_jaw(link, camera, teleporting, tmp_path,
+                                                                           monkeypatch):
+    """No wrist roll with the object in hand on a put either: the table grasp takes the yaw that, carried
+    with J6 held, lands along the calib's pick jaw over the drawer; a slow turn only if none does."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like)
+    cone = {"colour": "yellow", "shape": "cone", "drawer": None, "xy": [0.10, 0.19], "z": 0.013}
+    cmd = "노란색 원뿔을 왼쪽 위 서랍에 넣어"
+    COMMANDS[cmd] = {"task": "put", "colour": "yellow", "shape": "cone", "drawer": "r2c0"}
+    try:
+        result, world, _ = run(link, camera, teleporting, tmp_path, instruction=cmd, objects={"yellow_cone": cone})
+    finally:
+        COMMANDS.pop(cmd)
+    assert result["ok"] is True, result
+    ev = events(tmp_path)
+    yaw = [e for e in ev if e["event"] == "put_yaw"]
+    assert yaw and yaw[0]["deg_off_pick_jaw"] <= 10.0
+    assert not any(e["event"] == "slow_turn" for e in ev)
+    carried = [e for e in ev if e["event"] == "move" and e["phase"].startswith(("lift", "raise", "carry", "lower"))]
+    j6 = [e["angles_deg"][5] for e in carried if not e["phase"].startswith("lift: to")]
+    assert max(j6) - min(j6) < 0.2, (min(j6), max(j6))
+    assert world.objects["yellow_cone"]["drawer"] == "r2c0" and world.all_shut()
