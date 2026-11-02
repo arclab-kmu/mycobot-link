@@ -55,6 +55,38 @@ def with_taught(d, ids):
     return d
 
 
+def as_sim_scene(d):
+    """The same motions in sim-scene's v3.2 segment layout (results/taught_motions_v32.json): flat lists of
+    {stage, phase, gripper_before, speed, q_deg, tcp_m}, each leg's q_deg starting one step past where it
+    begins; routes with from_q_deg."""
+    names = {"in": "to_handle", "to_handle": "approach", "pull": "pull", "back_off": "back_off"}
+    for row in d["cabinet"]["drawers"]:
+        t = row.get("taught")
+        if not t:
+            continue
+        out = {"routes": {}}
+        for verb in ("open", "close"):
+            segs = []
+            for e in t[verb]:
+                if "out" in e:
+                    segs.append({"stage": None, "phase": "return", "gripper_before": None, "speed": 20,
+                                 "q_deg": e["out"]["q_deg"][1:], "tcp_m": e["out"]["tcp_m"][1:]})
+                    continue
+                grip = {"in": e["preshape"], "pull": e["close"], "back_off": e["release"]}
+                for key in ("in", "to_handle", "pull", "back_off"):
+                    phase = names[key] if not (verb == "close" and key == "pull") else "push"
+                    segs.append({"stage": 0, "phase": phase, "gripper_before": grip.get(key), "speed": 15,
+                                 "q_deg": e[key]["q_deg"][1:], "tcp_m": e[key]["tcp_m"][1:]})
+            out[verb] = segs
+        for name, r in t["routes"].items():
+            a, b = name.split(">")
+            sim = {"cabinet_look": "cabinet", "tilted": "tilted", "topdown": "topdown"}
+            out["routes"][f"{sim[a]}_to_{sim[b]}"] = {"phase": f"{sim[a]}_to_{sim[b]}", "q_deg": r["q_deg"][1:],
+                                                      "from_q_deg": r["q_deg"][0]}
+        row["taught"] = out
+    return d
+
+
 def _tmp():
     import tempfile
     from pathlib import Path
@@ -66,8 +98,15 @@ def test_taught_legs_load_and_agree_with_this_chain(tmp_path):
     c = calib.from_dict(d)
     t = c.fixture.drawers["r2c1"].taught
     assert t is not None and c.fixture.drawers["r1c1"].taught is None
-    assert len(t.open) == 1 and set(t.open[0].legs) == {"in", "to_handle", "pull", "back_off"} and t.open_out
+    assert [s.phase for s in t.open] == ["standoff", "approach", "pull", "back_off", "return"]
+    assert [s.gripper for s in t.open] == [55, None, 0, 55, None]
+    assert [s.opening_after for s in t.open] == [None, None, 0.1, None, None]
+    assert [s.opening_after for s in t.close] == [None, None, 0.0, None, None]
     assert set(t.routes) == {"cabinet_look>tilted", "tilted>cabinet_look", "tilted>topdown", "topdown>tilted"}
+    sim = calib.from_dict(as_sim_scene(with_taught(cs.sim_like_dict(), {"r2c1"}))).fixture.drawers["r2c1"].taught
+    assert [s.phase for s in sim.close] == ["standoff", "approach", "pull", "back_off", "return"]
+    assert [s.gripper for s in sim.open] == [55, None, 0, 55, None] and sim.open[2].opening_after == 0.1
+    assert sim.routes["cabinet_to_tilted"].start == t.routes["cabinet_look>tilted"].start
     task = drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
     assert task.taught_fk_mm() == pytest.approx(0.0, abs=0.01)  # its own FK, rounded to 1 um
 
@@ -75,15 +114,18 @@ def test_taught_legs_load_and_agree_with_this_chain(tmp_path):
 def test_a_taught_leg_more_than_2_deg_apart_stops_the_load():
     d = with_taught(cs.sim_like_dict(), {"r2c1"})
     row = next(r for r in d["cabinet"]["drawers"] if r["id"] == "r2c1")
-    q = row["taught"]["open"][0]["pull"]["q_deg"]
+    q = row["taught"]["open"][0]["pull"]["q_deg"]  # brain-spark's layout
     del q[1:3]
     with pytest.raises(calib.CalibError, match="more than 2 deg apart"):
         calib.from_dict(d)
 
 
-def test_a_find_plays_the_taught_open_close_and_view_routes(link, camera, teleporting, tmp_path, monkeypatch):
+@pytest.mark.parametrize("layout", ["brain-spark", "sim-scene"])
+def test_a_find_plays_the_taught_open_close_and_view_routes(link, camera, teleporting, tmp_path, monkeypatch, layout):
     from test_drawers import SIM_OBJECTS, events, run
     d = with_taught(cs.sim_like_dict(), {"r2c1"})
+    if layout == "sim-scene":
+        d = as_sim_scene(d)
     monkeypatch.setattr(cs, "load", lambda: calib.from_dict(d))
     cone = dict(SIM_OBJECTS["yellow_cone"], drawer="r2c1", xy=[0.289, 0.0])
     result, world, _ = run(link, camera, teleporting, tmp_path, objects={"yellow_cone": cone}, order=["r2c1"])
@@ -92,11 +134,11 @@ def test_a_find_plays_the_taught_open_close_and_view_routes(link, camera, telepo
     ev = events(tmp_path)
     taught = [e for e in ev if e["event"] == "taught"]
     assert taught[0]["drawers"] == ["r2c1"] and taught[0]["fk_vs_calib_tcp_max_mm"] < 0.01
-    assert any(e.get("route") == "r2c1 cabinet_look>tilted" for e in taught)
+    assert any(e.get("route") in ("r2c1 cabinet_look>tilted", "r2c1 cabinet_to_tilted") for e in taught)
     # The pull sent exactly the taught waypoints (no IK), 2 deg apart at most.
     t = calib.from_dict(d).fixture.drawers["r2c1"].taught
     pulled = [e["angles_deg"] for e in ev if e["event"] == "move" and e["phase"] == "open r2c1"]
-    assert pulled == [pytest.approx(list(q), abs=0.01) for q in t.open[0].legs["pull"].q[1:]]
+    assert pulled == [pytest.approx(list(q), abs=0.01) for q in next(s for s in t.open if s.phase == "pull").leg.q]
     assert not any(e["event"] == "skip" and "not a taught sequence" in e["why"] for e in ev)
 
 

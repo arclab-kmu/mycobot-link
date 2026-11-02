@@ -443,11 +443,10 @@ class DrawerTask(PickPlace):
     def _move_handle(self, d: Drawer, start: float, end: float, verb: str) -> None:
         """Move ``d`` from ``start`` m out to ``end``: per stage of its pull that the move covers (in
         order to open, backwards to shut), grasp the handle, move it, let go, back off."""
-        t = d.taught
-        if t is not None:
-            stages = t.open if end > start else t.close
-            lo, hi = min(s.from_m for s in stages), max(s.to_m for s in stages)
-            if (abs(start - lo) < 2e-3 and abs(end - hi) < 2e-3) or (abs(start - hi) < 2e-3 and abs(end - lo) < 2e-3):
+        if d.taught is not None:
+            full = (abs(start) < 2e-3 and abs(end - self.fx.open_m) < 2e-3) or \
+                (abs(start - self.fx.open_m) < 2e-3 and abs(end) < 2e-3)
+            if full:
                 self._taught_handle(d, verb)
                 return
             self.log.event("skip", why=f"{verb} {d.id} from {start:.3f} to {end:.3f} m: not a taught sequence, planned")
@@ -506,42 +505,40 @@ class DrawerTask(PickPlace):
                        a_now, j_now, either_jaw=either)
 
     def _taught_handle(self, d: Drawer, verb: str) -> None:
-        """Open or shut ``d`` along sim-scene's verified waypoints (calib v3.2): per stage, preshape, in,
-        to the handle, close, pull (or push), let go, back off; then out to the cabinet look."""
+        """Open or shut ``d`` along sim-scene's verified waypoints (calib v3.2): per segment, the gripper value
+        it starts with, then its waypoints - to the standoff, onto the handle, pull (or push), back off, and
+        back to the cabinet look."""
         t = d.taught
         assert t is not None
-        stages, out = (t.open, t.open_out) if verb == "open" else (t.close, t.close_out)
-        c = self.calib
+        segs = t.open if verb == "open" else t.close
+        n = len({seg.stage for seg in segs if seg.stage is not None})
         self._phase(f"{verb} {d.id}")
-        for k, st in enumerate(stages):
-            tag = f"{verb} {d.id}" + ("" if len(stages) == 1 else f" ({k + 1}/{len(stages)})")
-            release = st.release if st.release is not None else c.gripper_open
-            self._gripper(st.preshape if st.preshape is not None else release, "open")
-            self._play(st.legs["in"], f"{tag}: pre-grasp", first=k == 0)
-            with self._near(skip=d.id, at_handle=True):
-                self._play(st.legs["to_handle"], f"{tag}: to handle")
-                self._gripper(st.close if st.close is not None else c.gripper_closed, "close")
-                with self._near(moving=d.id):
-                    self._play(st.legs["pull"], tag, speed=self.s.handle_speed)
-                self.opening[d.id] = st.to_m if verb == "open" else st.from_m
-                self._gripper(release, "open")
-                self._play(st.legs["back_off"], f"{tag}: back off")
-        if out is not None:
-            self._play(out, f"{verb} {d.id}: cabinet look")
+        for i, seg in enumerate(segs):
+            tag = f"{verb} {d.id}" + (f" ({seg.stage + 1}/{n})" if n > 1 and seg.stage is not None else "")
+            if seg.gripper is not None:
+                self._gripper(seg.gripper, "close" if seg.phase == "pull" else "open")
+            label, ctx = {"standoff": (f"{tag}: pre-grasp", {}),
+                          "approach": (f"{tag}: to handle", dict(skip=d.id, at_handle=True)),
+                          "pull": (tag, dict(skip=d.id, at_handle=True, moving=d.id)),
+                          "back_off": (f"{tag}: back off", dict(skip=d.id, at_handle=True)),
+                          "return": (f"{verb} {d.id}: cabinet look", {})}[seg.phase]
+            with self._near(**ctx):
+                self._play(seg.leg, label, speed=self.s.handle_speed if seg.phase == "pull" else None, first=i == 0)
+            if seg.opening_after is not None:
+                self.opening[d.id] = seg.opening_after
 
     def _play(self, leg: TaughtLeg, phase: str, speed: Optional[int] = None, first: bool = False) -> None:
-        """Send a taught leg as it is. More than 3 deg from its first waypoint, go there first by a checked
-        move. The brain's checker looks at it too, but only to log (leader 2026-11-02 12:24)."""
+        """Send a taught leg as it is. More than 3 deg from where it starts (5 deg from its first waypoint,
+        when the start is not given), go there first by a checked move. The brain's checker looks at it
+        too, but only to log (leader 2026-11-02 12:24)."""
         here = self._measured()
-        start = list(leg.q[0])
-        if max(abs(a - b) for a, b in zip(here, start)) > 3.0:
+        start, tol = (leg.start, 3.0) if leg.start is not None else (leg.q[0], 5.0)
+        if max(abs(a - b) for a, b in zip(here, start)) > tol:
             # Not low over the table, where an object may stand (the handover mat).
-            self._goto(start, f"{phase}: to the taught start", floor=self.calib.table_z + self.s.leave_mat_m
+            self._goto(list(start), f"{phase}: to the taught start", floor=self.calib.table_z + self.s.leave_mat_m
                        if first else None, taught=False)
             here = self._measured()
-        path = [list(q) for q in leg.q[1:]]
-        if not path:
-            return
+        path = [list(q) for q in leg.q]
         why = self._path_clear([here] + path, points=False, **self._ctx)
         if why is not None:
             self.log.event("taught_check", phase=phase, why=why)
@@ -553,13 +550,18 @@ class DrawerTask(PickPlace):
         def near(a: Sequence[float], b: Sequence[float], tol: float) -> bool:
             return max(abs(x - y) for x, y in zip(a, b)) <= tol
 
-        paths: List[List[Tuple[str, TaughtLeg]]] = [[r] for r in self._routes if near(here, r[1].q[0], 3.0)]
+        def starts(leg: TaughtLeg) -> Tuple[Tuple[float, ...], float]:
+            # Where it begins; a first waypoint is up to 2 deg past the start.
+            return (leg.start, 0.5) if leg.start is not None else (leg.q[0], 2.5)
+
+        paths: List[List[Tuple[str, TaughtLeg]]] = [[r] for r in self._routes
+                                                    if near(here, starts(r[1])[0], 3.0 + starts(r[1])[1] - 0.5)]
         for _ in range(3):
             for path in paths:
                 if near(goal, path[-1][1].q[-1], 0.5):
                     return path
             paths = [path + [r] for path in paths for r in self._routes
-                     if r not in path and near(path[-1][1].q[-1], r[1].q[0], 0.5)]
+                     if r not in path and near(path[-1][1].q[-1], starts(r[1])[0], starts(r[1])[1])]
         return None
 
     def taught_fk_mm(self) -> Optional[float]:

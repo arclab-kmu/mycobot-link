@@ -48,6 +48,7 @@ def score(d: Path, audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     ev = [json.loads(line) for line in (d / "events.jsonl").read_text().splitlines()]
     result = [e for e in ev if e["event"] == "result"][-1]
     kind = meta["run"].split("_")[1]
+    kind = "find" if kind == "demo" else kind  # the demo is a find on its own seed
     drawer = meta.get("drawer") or ""
     oid = _moved(before, after, kind, drawer)
     o = after["objects"].get(oid) if oid else None
@@ -92,7 +93,8 @@ def main() -> None:
             audit.update(json.loads(a.read_text())["runs"])
     rows: List[Dict[str, Any]] = []
     # Run directories only: archived passes (d3_try*) sit beside them.
-    runs = [x for x in args.runs.glob(args.glob) if x.is_dir() and x.name.split("_")[1:2] in (["put"], ["take"], ["find"])]
+    runs = [x for x in args.runs.glob(args.glob)
+            if x.is_dir() and x.name.split("_")[1:2] in (["put"], ["take"], ["find"], ["demo"])]
     for d in sorted(runs):
         try:
             rows.append(score(d, audit))
