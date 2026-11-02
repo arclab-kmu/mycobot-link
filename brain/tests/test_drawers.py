@@ -327,3 +327,27 @@ def test_on_sim_scene_numbers_the_close_look_into_a_drawer_is_the_calib_s_straig
     close = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "close look: r0c1"]
     assert close[-1]["angles_deg"] == pytest.approx(scene.fixture.drawer("r0c1").topdown_pose_deg, abs=0.01)
     assert world.in_handover("yellow_cone") and world.all_shut()
+
+
+def test_a_two_stage_handle_pulls_halfway_from_the_side_then_from_above(link, camera, teleporting, tmp_path,
+                                                                        monkeypatch):
+    """sim-scene's v3 recipe: a horizontal grip at the end of a full pull puts the wrist in the base, so the
+    pull goes to 50 mm by a side pinch and on to open by a top-down pinch; shutting runs it backwards."""
+    monkeypatch.setattr(cs, "load", cs.load_sim_like_two_stage)
+    cone = dict(SIM_OBJECTS["yellow_cone"], drawer="r1c1", xy=[0.289, 0.0], z=0.063 + 0.013)
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects={"yellow_cone": cone}, order=["r1c1"])
+    assert result["ok"] is True, result
+    assert world.in_handover("yellow_cone") and world.all_shut()
+    scene = cs.load_sim_like_two_stage()
+    phase, grips = "", []
+    for e in events(tmp_path):
+        phase = e["phase"] if e["event"] == "move" else phase
+        if e["event"] == "gripper" and e["action"] == "close" and phase.endswith("to handle"):
+            t = scene.chain.pose(last_angles, "tcp")
+            grips.append((phase, round(kinematics.column(t, 2)[2], 2)))
+        if e["event"] == "move":
+            last_angles = e["angles_deg"]
+    assert grips == [("open r1c1 (1/2): to handle", 0.0), ("open r1c1 (2/2): to handle", -1.0),
+                     ("close r1c1 (2/2): to handle", -1.0), ("close r1c1 (1/2): to handle", 0.0)]
+    pulls = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "open r1c1 (2/2)"]
+    assert pulls[-1]["tcp_xyz"][0] == pytest.approx(0.236 - 0.1, abs=0.002)  # the knob, fully out

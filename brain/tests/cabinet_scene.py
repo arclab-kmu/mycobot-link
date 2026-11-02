@@ -96,7 +96,7 @@ class World:
         self.opening = {d: 0.0 for d in self.fx.drawers}
         self.objects = {k: dict(v, held=False) for k, v in objects.items()}
         self.start = json.loads(json.dumps(self.objects))
-        self.grip = None  # ("handle", drawer id, tcp - handle) or ("object", id, offset)
+        self.grip = None  # ("handle", drawer id, TCP grip point with the drawer shut) or ("object", id, offset)
         self.angles = list(scene.look_pose_deg)
         self._seen = 0
 
@@ -129,8 +129,8 @@ class World:
         self.angles = list(q)
         p = self.tcp()
         if self.grip and self.grip[0] == "handle":
-            d = self.fx.drawers[self.grip[1]]
-            s = kinematics.dot([p[i] - d.handle_closed[i] for i in range(3)], self.fx.pull_axis)
+            d, held = self.fx.drawers[self.grip[1]], self.grip[2]  # where the TCP held it, drawer shut
+            s = kinematics.dot([p[i] - held[i] for i in range(3)], self.fx.pull_axis)
             self.opening[d.id] = min(max(s, 0.0), self.fx.open_m)
         elif self.grip and self.grip[0] == "object":
             o = self.objects[self.grip[1]]
@@ -141,9 +141,10 @@ class World:
         p = self.tcp()
         if value < 50 and self.grip is None:
             for d in self.fx.drawers.values():
-                if math.dist(p, self.fx.handle(d, self.opening[d.id])) < 0.006:
-                    self.grip = ("handle", d.id)
-                    return
+                for stage in self.fx.stages(d):  # any of the calib's grips on it
+                    if math.dist(p, self.fx.stage_tcp(stage, self.opening[d.id])) < 0.006:
+                        self.grip = ("handle", d.id, stage.tcp_closed)
+                        return
             for oid, o in self.objects.items():
                 shape = self.fx.shapes[o["shape"]]
                 q = self.pos(oid)
@@ -376,3 +377,24 @@ def load_sim_like_with_capsules(capsules=None):
     d = sim_like_dict()
     d["robot_collision"] = capsules or SYNTH_CAPSULES
     return calib.from_dict(d, "cabinet_scene.py (sim-scene numbers, made-up capsules)")
+
+
+def with_two_stage_handles(d, ids=None):
+    """sim-scene's v3 handle recipe (BOARD 2026-11-02 11:32), in the shape the brain reads: a side pinch
+    from shut to 50 mm, then a top-down pinch of the knob's left/right faces to fully open. The numbers
+    are made up on the v2 geometry; v3's own replace them."""
+    for row in d["cabinet"]["drawers"]:
+        if ids is not None and row["id"] not in ids:
+            continue
+        knob = row["handle_center_closed_m"]
+        row["handle_stages"] = [
+            {"from_m": 0.0, "to_m": 0.05, "tcp_closed_m": row["handle_closed_m"], "approach": row["approach"],
+             "jaw_axis": [0.0, 0.0, 1.0], "standoff_m": 0.05},
+            {"from_m": 0.05, "to_m": d["cabinet"]["open_m"], "tcp_closed_m": [knob[0], knob[1], knob[2] + 0.004],
+             "approach": [0.0, 0.0, -1.0], "jaw_axis": [0.0, 1.0, 0.0], "standoff_m": 0.03},
+        ]
+    return d
+
+
+def load_sim_like_two_stage():
+    return calib.from_dict(with_two_stage_handles(sim_like_dict()), "cabinet_scene.py (two-stage handles)")

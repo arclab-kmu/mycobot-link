@@ -229,3 +229,23 @@ def test_pointed_handles_on_a_shut_handle_or_off_every_track_open_nothing():
     out = drawer_vlm.assign_handles([(438, 578), (345, 800), (900, 100)], tracks)
     assert out["open_drawers"] == ["r2c0"]
     assert out["dropped"][0]["near"] == "a shut handle" and out["dropped"][1]["near"]["off"] > 70
+
+
+def test_handle_stages_from_the_calib_or_one_from_the_old_keys():
+    old = cs.load_sim_like().fixture
+    (one,) = old.stages(old.drawers["r1c1"])
+    assert (one.from_m, one.to_m, one.standoff_m, one.preshape, one.close) == (0.0, 0.1, 0.08, 55, 0)
+    assert one.tcp_closed == old.drawers["r1c1"].handle_closed
+    new = cs.load_sim_like_two_stage().fixture
+    side, top = new.stages(new.drawers["r1c1"])
+    assert (side.from_m, side.to_m, top.from_m, top.to_m) == (0.0, 0.05, 0.05, 0.1)
+    assert top.approach == (0.0, 0.0, -1.0) and top.jaw == (0.0, 1.0, 0.0) and top.standoff_m == 0.03
+    assert top.release == 55 and top.close == 0  # the cabinet's handle_grasp values
+    assert new.stage_tcp(top, 0.05) == pytest.approx((0.236 - 0.05, 0.0, top.tcp_closed[2]))
+
+
+def test_a_handle_stage_without_its_numbers_stops_the_load():
+    d = cs.with_two_stage_handles(cs.sim_like_dict(), ids={"r0c0"})
+    del d["cabinet"]["drawers"][0]["handle_stages"][1]["standoff_m"]
+    with pytest.raises(calib.CalibError, match=r"r0c0 handle_stages\[1\]"):
+        calib.from_dict(d)

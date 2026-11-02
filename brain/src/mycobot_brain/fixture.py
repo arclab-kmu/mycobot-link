@@ -46,6 +46,25 @@ def _pose(v: Any) -> Optional[List[float]]:
 
 
 @dataclass(frozen=True)
+class HandleStage:
+    """One grip on a handle over part of the pull: from ``from_m`` to ``to_m`` out.
+
+    sim-scene's v3 recipe (BOARD 2026-11-02 11:32) pulls in two: a side pinch to 50 mm, then a top-down
+    pinch to fully open, because a horizontal grip at the end of a full pull puts the wrist in the base.
+    """
+
+    from_m: float
+    to_m: float
+    tcp_closed: Vec  # TCP target on the handle with the drawer shut; moves with the drawer
+    approach: Vec  # tool z
+    jaw: Optional[Vec]  # tool x; None leaves it free
+    standoff_m: float  # pre-grasp and back-off along the tool axis
+    preshape: Optional[int] = None  # gripper to come in with
+    close: Optional[int] = None
+    release: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class Drawer:
     id: str
     row: int
@@ -67,6 +86,8 @@ class Drawer:
     wall_h: Optional[float] = None
     #: the drawer front's bottom and top
     panel_z: Optional[Tuple[float, float]] = None
+    #: the calib's grips over the pull, in order; empty: one grip from the cabinet-wide keys
+    stages: Tuple[HandleStage, ...] = ()
 
     @property
     def knob_closed(self) -> Vec:
@@ -198,6 +219,19 @@ class Fixture:
             out.append((f"{d.id} {name}", lo, hi))
         return out
 
+    def stages(self, d: Drawer) -> List[HandleStage]:
+        """The grips that open ``d``, in order: the calib's ``handle_stages``, else one grip all the way
+        from ``handle_closed_m`` and the cabinet's handle keys."""
+        if d.stages:
+            return list(d.stages)
+        a, j = self.handle_frame(d)
+        return [HandleStage(0.0, self.open_m, d.handle_closed, a, j, self.standoff_m, self.handle_open_value,
+                            self.handle_close_value, self.handle_open_value)]
+
+    def stage_tcp(self, stage: HandleStage, opening: float) -> Vec:
+        """Where the TCP holds the handle in ``stage`` with the drawer ``opening`` m out."""
+        return tuple(h + opening * a for h, a in zip(stage.tcp_closed, self.pull_axis))  # type: ignore[return-value]
+
     def knob(self, d: Drawer, opening: float) -> Vec:
         """The handle's centre with the drawer ``opening`` m out, for marking it in a picture."""
         return tuple(h + opening * a for h, a in zip(d.knob_closed, self.pull_axis))  # type: ignore[return-value]
@@ -317,6 +351,30 @@ def _shape(name: str, s: Dict[str, Any]) -> Shape:
     return Shape(name, float(s["height_m"]), width, float(grasp))
 
 
+def _stage(drawer_id: str, k: int, st: Dict[str, Any], cabinet: Dict[str, Any]) -> HandleStage:
+    """One entry of a drawer's ``handle_stages``; gripper values default to the cabinet's handle_grasp."""
+    def first(*keys: str) -> Any:
+        return next((st[k] for k in keys if st.get(k) is not None), None)
+
+    tcp, approach = first("tcp_closed_m", "handle_closed_m", "tcp_m"), first("approach", "approach_axis")
+    standoff = first("standoff_m", "pregrasp_m", "far_m")
+    if tcp is None or approach is None or standoff is None or "from_m" not in st or "to_m" not in st:
+        raise FixtureError(f"{drawer_id} handle_stages[{k}]: needs from_m, to_m, tcp_closed_m, approach, standoff_m")
+    jaw = first("jaw_axis", "jaw")
+    preshape = first("preshape", "preshape_value") if first("preshape", "preshape_value") is not None else \
+        cabinet.get("preshape_value", cabinet.get("release_value"))
+    close = first("close", "close_value") if first("close", "close_value") is not None else cabinet.get("close_value")
+    release = first("release", "release_value") if first("release", "release_value") is not None else \
+        cabinet.get("release_value", cabinet.get("preshape_value"))
+    stage = HandleStage(float(st["from_m"]), float(st["to_m"]), _vec(tcp), _unit(_vec(approach)),  # type: ignore[arg-type]
+                        None if jaw is None else _unit(_vec(jaw)), float(standoff),
+                        None if preshape is None else int(preshape), None if close is None else int(close),
+                        None if release is None else int(release))
+    if not stage.to_m > stage.from_m >= 0.0:
+        raise FixtureError(f"{drawer_id} handle_stages[{k}]: from_m {stage.from_m} to_m {stage.to_m}")
+    return stage
+
+
 def from_dict(d: Dict[str, Any]) -> Fixture:
     """The ``cabinet`` / ``catalogue`` / ``handover`` sections of a calib file."""
     try:
@@ -346,6 +404,7 @@ def from_dict(d: Dict[str, Any]) -> Fixture:
                 knob=_vec(row["handle_center_closed_m"]) if row.get("handle_center_closed_m") else None,  # type: ignore[arg-type]
                 wall_h=None if wall_h is None else float(wall_h),
                 panel_z=_vec(row["front_panel_z_m"], 2) if row.get("front_panel_z_m") else None,  # type: ignore[arg-type]
+                stages=tuple(_stage(row["id"], k, st, grasp) for k, st in enumerate(row.get("handle_stages") or ())),
             )
             if dr.id != f"r{dr.row}c{dr.col}":
                 raise FixtureError(f"drawer id {dr.id!r} does not match row {dr.row}, col {dr.col}")

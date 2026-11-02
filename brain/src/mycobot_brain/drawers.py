@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from mycobot_brain import collision, drawer_vlm, grounding, kinematics
-from mycobot_brain.fixture import Drawer, Fixture, Shape
+from mycobot_brain.fixture import Drawer, Fixture, HandleStage, Shape
 from mycobot_brain.kinematics import IKError, Vec
 from mycobot_brain.pickplace import DOWN, TILTS_DEG, PathBlocked, PickPlace, PickPlaceError, Settings, _r
 
@@ -58,9 +58,10 @@ def _in_box(p: Sequence[float], lo: Sequence[float], hi: Sequence[float], m: flo
 
 @dataclass
 class HandlePlan:
-    """How one drawer's handle is held: tool frame and IK seed at shut (0.0) and open (open_m),
-    and whether the heading may drift during the pull."""
+    """How one stage of a drawer's pull holds the handle: tool frame and IK seed at the stage's two
+    ends (``from_m``, ``to_m``), and whether the heading may drift during the pull."""
 
+    stage: HandleStage
     frames: Dict[float, Tuple[Vec, Optional[Vec]]]
     seeds: Dict[float, List[float]]
     free: bool
@@ -81,7 +82,7 @@ class DrawerTask(PickPlace):
         #: how far the code has pulled each drawer out, as commanded; the VLM says whether it is open.
         self.opening: Dict[str, float] = {d: 0.0 for d in self.fx.drawers}
         self.opened: List[str] = []  # drawers this run opened, in order
-        self._plans: Dict[str, HandlePlan] = {}
+        self._plans: Dict[str, List[HandlePlan]] = {}
         #: what the fingers may come close to in the moves now being made (see :meth:`_near`).
         self._ctx: Dict[str, Any] = {}
         self._lifted: Optional[List[float]] = None  # the arm after the last lift, holding the object
@@ -140,7 +141,7 @@ class DrawerTask(PickPlace):
             try:
                 a, _ = self._handle_frame(d)
                 reach[d.id] = round(math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(
-                    a, self.fx.handle_frame(d)[0]))))), 1)
+                    a, self.fx.stages(d)[0].approach))))), 1)
             except PickPlaceError:
                 reach[d.id] = None
         self.log.event("plan", command=cmd, handle_tilt_deg=reach)
@@ -253,24 +254,29 @@ class DrawerTask(PickPlace):
 
     def _handle_frame(self, d: Drawer) -> Tuple[Vec, Optional[Vec]]:
         """Approach and jaw axes for grasping ``d``'s handle shut; see :meth:`_handle_plan`."""
-        plan = self._handle_plan(d)
-        return plan.frames[0.0]
+        first = self._handle_plan(d)[0]
+        return first.frames[first.stage.from_m]
 
-    def _handle_plan(self, d: Drawer) -> "HandlePlan":
-        """How to hold ``d``'s handle over the whole pull, checked once before the arm moves.
+    def _handle_plan(self, d: Drawer) -> List[HandlePlan]:
+        """How to hold ``d``'s handle over the whole pull, stage by stage (:meth:`Fixture.stages`),
+        checked once before the arm moves.
 
-        In order: the calib's frame all the way; then (with a jaw axis) the
-        jaw held and the heading left to drift up to ``yaw_drift_deg`` - pads
-        pinching two faces can turn about the line through them, and near the
-        edge of reach the arm needs that; then, for a grasp from above, tipped
-        5-15 deg towards the base, as pick-place tips its grasp (unless that
-        leans the camera into the cabinet).
+        Per stage, in order: the calib's frame all the way; then (with a jaw
+        axis) the jaw held and the heading left to drift up to ``yaw_drift_deg``
+        - pads pinching two faces can turn about the line through them, and
+        near the edge of reach the arm needs that; then tipped 5-15 deg towards
+        the base, as pick-place tips its grasp (unless that leans the camera
+        into the cabinet).
         """
         if d.id in self._plans:
             return self._plans[d.id]
-        fx, chain = self.fx, self.calib.chain
-        a0, j0 = fx.handle_frame(d)
-        h = fx.handle(d, fx.open_m)
+        plans = [self._stage_plan(d, k, stage) for k, stage in enumerate(self.fx.stages(d))]
+        self._plans[d.id] = plans
+        return plans
+
+    def _stage_plan(self, d: Drawer, k: int, stage: HandleStage) -> HandlePlan:
+        a0, j0 = stage.approach, stage.jaw
+        h = self.fx.stage_tcp(stage, stage.to_m)
         r = math.hypot(h[0], h[1])
         axis = kinematics.cross(a0, (-h[0] / r, -h[1] / r, 0.0))
         options: List[Tuple[str, Vec, Optional[Vec], bool]] = [("calib", a0, j0, False)]
@@ -279,24 +285,24 @@ class DrawerTask(PickPlace):
         if kinematics.norm(axis) > 1e-6:
             for tilt in TILTS_DEG[1:]:
                 rot = kinematics.axis_angle(axis, math.radians(tilt))
-                a = tuple(sum(rot[i][k] * a0[k] for k in range(3)) for i in range(3))
-                j = None if j0 is None else tuple(sum(rot[i][k] * j0[k] for k in range(3)) for i in range(3))
+                a = tuple(sum(rot[i][m] * a0[m] for m in range(3)) for i in range(3))
+                j = None if j0 is None else tuple(sum(rot[i][m] * j0[m] for m in range(3)) for i in range(3))
                 options.append((f"tipped {tilt} deg", a, j, False))  # type: ignore[arg-type]
         whys = []
+        which = "" if len(self.fx.stages(d)) == 1 else f" stage {k + 1}"
         for name, a, j, free in options:
             try:
-                plan = self._try_handle(d, a, j, free)
+                plan = self._try_handle(d, stage, a, j, free)
             except (IKError, PickPlaceError) as exc:
                 whys.append(f"{name}: {exc}")
                 continue
             if name != "calib":
-                self.log.event("approach", what=f"handle {d.id}", how=name)
-            self._plans[d.id] = plan
+                self.log.event("approach", what=f"handle {d.id}{which}", how=name)
             return plan
-        raise PickPlaceError(f"handle of {d.id}: no grasp that holds over the whole pull ({'; '.join(whys)})")
+        raise PickPlaceError(f"handle of {d.id}{which}: no grasp that holds over the whole pull ({'; '.join(whys)})")
 
-    def _try_handle(self, d: Drawer, a: Vec, j: Optional[Vec], free: bool) -> "HandlePlan":
-        """The first IK branch, by seed, that holds the grip over the whole pull and back-off."""
+    def _try_handle(self, d: Drawer, stage: HandleStage, a: Vec, j: Optional[Vec], free: bool) -> HandlePlan:
+        """The first IK branch, by seed, that holds the grip over the stage's pull and back-off."""
         # The table look pose first (an ordinary elbow-up arm, whatever the cabinet view needs), then
         # the drawer's own look and the cabinet look: one seed's branch can run into a joint limit
         # mid-pull where another's does not (r2c0 on sim-scene's numbers from v1's look pose).
@@ -304,85 +310,100 @@ class DrawerTask(PickPlace):
         err: Exception = PickPlaceError("no seed pose")
         for seed in seeds:
             try:
-                return self._try_handle_from(d, a, j, free, seed)
+                return self._try_handle_from(d, stage, a, j, free, seed)
             except (IKError, PickPlaceError) as exc:
                 err = exc
         raise err
 
-    def _try_handle_from(self, d: Drawer, a: Vec, j: Optional[Vec], free: bool,
-                         seed: Sequence[float]) -> "HandlePlan":
+    def _try_handle_from(self, d: Drawer, stage: HandleStage, a: Vec, j: Optional[Vec], free: bool,
+                         seed: Sequence[float]) -> HandlePlan:
         fx, chain = self.fx, self.calib.chain
-        pre = kinematics.solve_ik(chain, seed, _add(fx.handle(d, 0.0), a, -fx.standoff_m), approach=a, jaw=j)
-        to_handle = kinematics.line_path(chain, pre, fx.handle(d, 0.0), step_m=0.02, approach=a, jaw=j)
-        pull = kinematics.line_path(chain, to_handle[-1], fx.handle(d, fx.open_m), step_m=self.s.line_step_m,
+        s0, s1, off = stage.from_m, stage.to_m, stage.standoff_m
+        pre = kinematics.solve_ik(chain, seed, _add(fx.stage_tcp(stage, s0), a, -off), approach=a, jaw=j)
+        to_handle = kinematics.line_path(chain, pre, fx.stage_tcp(stage, s0), step_m=0.02, approach=a, jaw=j)
+        pull = kinematics.line_path(chain, to_handle[-1], fx.stage_tcp(stage, s1), step_m=self.s.line_step_m,
                                     approach=None if free else a, jaw=j)
-        path = to_handle + pull
-        t = chain.pose(path[-1], "tcp")
+        t = chain.pose(pull[-1], "tcp")
         a1, j1 = kinematics.column(t, 2), kinematics.column(t, 0) if j is not None else None
         drift = math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(a, a1)))))
         if drift > self.s.yaw_drift_deg:
             raise PickPlaceError(f"the gripper turns {drift:.0f} deg over the pull")
-        back = kinematics.line_path(chain, path[-1], _add(fx.handle(d, fx.open_m), a1, -fx.standoff_m), step_m=0.02,
+        back = kinematics.line_path(chain, pull[-1], _add(fx.stage_tcp(stage, s1), a1, -off), step_m=0.02,
                                     approach=a1, jaw=j1)
         # A tipped or turned gripper leans its back (and the camera) towards the cabinet face. The drawer
-        # is shut on the way in, moves with the hand on the pull (and the push), and is open on the way out.
-        shut, out = {**self.opening, d.id: 0.0}, {**self.opening, d.id: fx.open_m}
+        # is at s0 on the way in, moves with the hand on the pull (and the push), and is at s1 on the way out.
+        at0, at1 = {**self.opening, d.id: s0}, {**self.opening, d.id: s1}
         legs: List[Tuple[List[List[float]], Dict[str, Any]]] = [
-            ([pre] + to_handle, dict(openings=shut)),
-            ([to_handle[-1]] + pull, dict(openings=shut, moving=d.id)),
-            ([pull[-1]] + back, dict(openings=out))]
+            ([pre] + to_handle, dict(openings=at0)),
+            ([to_handle[-1]] + pull, dict(openings=at0, moving=d.id)),
+            ([pull[-1]] + back, dict(openings=at1))]
         for leg, ctx in legs:
             hit = self._path_clear(leg, skip=d.id, at_handle=True, **ctx)
             if hit:
                 raise PickPlaceError(f"the {hit}")
-        # Joint moves between the cabinet look and the standoffs, shut and open, must keep the
-        # gripper off every handle (D3 s500: rising from a 4 cm back-off it caught the knob above),
-        # and the arm off itself: they may go round (:meth:`_route`).
+        # Joint moves between the cabinet look and the standoffs at both ends must keep the gripper off
+        # every handle (D3 s500: rising from a 4 cm back-off it caught the knob above), and the arm off
+        # itself: they may go round (:meth:`_route`).
         look = fx.cabinet_look_pose_deg
         if look:
-            # Shut, the pre-grasp is also where a push backs off to.
-            for name, q, openings in (("standoff shut", pre, shut), ("standoff open", back[-1], out)):
+            # The pre-grasp at s0 is also where a push to s0 backs off to.
+            for name, q, openings in ((f"standoff at {s0 * 1000:.0f} mm", pre, at0),
+                                      (f"standoff at {s1 * 1000:.0f} mm", back[-1], at1)):
                 for there, other in ((look, q), (q, look)):
                     vias, _, why = self._route(there, other, None, openings=openings)
                     if vias is None:
                         raise PickPlaceError(f"cabinet look <-> {name}: the {why}")
-        return HandlePlan(frames={0.0: (a, j), fx.open_m: (a1, j1)}, free=free,
-                          seeds={0.0: pre, fx.open_m: back[-1]})
+        return HandlePlan(stage=stage, frames={s0: (a, j), s1: (a1, j1)}, free=free, seeds={s0: pre, s1: back[-1]})
 
     def _move_handle(self, d: Drawer, start: float, end: float, verb: str) -> None:
+        """Move ``d`` from ``start`` m out to ``end``: per stage of its pull that the move covers (in
+        order to open, backwards to shut), grasp the handle, move it, let go, back off."""
+        plans = self._handle_plan(d)
+        legs: List[Tuple[int, HandlePlan, float, float]] = []
+        for k, plan in enumerate(plans):
+            lo, hi = max(plan.stage.from_m, min(start, end)), min(plan.stage.to_m, max(start, end))
+            if hi > lo + 1e-4:
+                legs.append((k, plan, lo, hi) if end > start else (k, plan, hi, lo))
+        if end < start:
+            legs.reverse()
+        self._phase(f"{verb} {d.id}")
+        for i, (k, plan, s0, s1) in enumerate(legs):
+            tag = f"{verb} {d.id}" + ("" if len(plans) == 1 else f" ({k + 1}/{len(plans)})")
+            self._handle_leg(d, plan, s0, s1, tag, first=i == 0)
+
+    def _handle_leg(self, d: Drawer, plan: HandlePlan, start: float, end: float, tag: str, first: bool) -> None:
         """Grasp the handle where the drawer is (``start`` m out), move it to ``end``, let go, back off."""
-        fx, c = self.fx, self.calib
-        plan = self._handle_plan(d)
+        fx, c, stage = self.fx, self.calib, plan.stage
         near = min(plan.frames, key=lambda o: abs(o - start))
         a, j = plan.frames[near]
-        self._phase(f"{verb} {d.id}")
-        release = fx.handle_open_value if fx.handle_open_value is not None else c.gripper_open
-        self._gripper(release, "open")
+        release = stage.release if stage.release is not None else c.gripper_open
+        preshape = stage.preshape if stage.preshape is not None else release
+        self._gripper(preshape, "open")
         # Every knob approach starts from the cabinet look, as the reset pose and sim-scene's D1 runs
         # do: in D3 s462 the joint move from the table look to r0c2's pre-grasp swept low across the
         # cabinet front and the arm stalled 6.8 deg short (it hit something our TCP/camera check misses).
+        # A later stage of the same pull goes straight on from the back-off (routed).
         here, look = self._measured(), fx.cabinet_look_pose_deg
-        if look and max(abs(a - b) for a, b in zip(here, look)) > 1.0:
+        if first and look and max(abs(a - b) for a, b in zip(here, look)) > 1.0:
             # Not low over the table, where an object may stand (the handover mat).
-            self._goto(look, f"{verb} {d.id}: cabinet look", floor=self.calib.table_z + self.s.leave_mat_m)
+            self._goto(look, f"{tag}: cabinet look", floor=self.calib.table_z + self.s.leave_mat_m)
         try:
-            q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.handle(d, start), a, -fx.standoff_m),
+            q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.stage_tcp(stage, start), a, -stage.standoff_m),
                                     approach=a, jaw=j)
         except IKError as exc:
-            raise PickPlaceError(f"{verb} {d.id}: pre-grasp: {exc}") from exc
-        self._goto(q, f"{verb} {d.id}: pre-grasp", floor=None)
+            raise PickPlaceError(f"{tag}: pre-grasp: {exc}") from exc
+        self._goto(q, f"{tag}: pre-grasp", floor=None)
         with self._near(skip=d.id, at_handle=True):
-            self._line(fx.handle(d, start), f"{verb} {d.id}: to handle", a, j)
-            close = fx.handle_close_value if fx.handle_close_value is not None else c.gripper_closed
-            self._gripper(close, "close")
+            self._line(fx.stage_tcp(stage, start), f"{tag}: to handle", a, j)
+            self._gripper(stage.close if stage.close is not None else c.gripper_closed, "close")
             with self._near(moving=d.id):
-                self._line(fx.handle(d, end), f"{verb} {d.id}", None if plan.free else a, j, speed=self.s.handle_speed)
+                self._line(fx.stage_tcp(stage, end), tag, None if plan.free else a, j, speed=self.s.handle_speed)
             self.opening[d.id] = end
             self._gripper(release, "open")
             # Back off along the tool axis as it is now: with a free heading it has turned on the way.
             t = c.chain.pose(self._measured(), "tcp")
             a_now, j_now = kinematics.column(t, 2), (kinematics.column(t, 0) if j is not None else None)
-            self._line(_add(fx.handle(d, end), a_now, -fx.standoff_m), f"{verb} {d.id}: back off", a_now, j_now)
+            self._line(_add(fx.stage_tcp(stage, end), a_now, -stage.standoff_m), f"{tag}: back off", a_now, j_now)
 
     def _open(self, d: Drawer, again: bool = False) -> None:
         # ``again``: the VLM does not see it open, so pull from shut whatever the code thinks.
