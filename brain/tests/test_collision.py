@@ -258,10 +258,94 @@ def test_the_hand_keeps_2_mm_off_the_scene_only_while_it_grasps(tmp_path):
     assert task._robot_clear(q, post, "all", grasping=True) is None
     # Which moves count as grasping: at a handle, in the drawer or on the mat it grasps on; not a free move.
     seen = []
-    task._robot_clear = lambda q, boxes, near, grasping=False: seen.append(grasping)
+    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now": seen.append(grasping)
     path = [q, q]
     for kw, want in ((dict(), False), (dict(at_handle=True, skip="r1c1"), True), (dict(grasp_in="r1c1"), True),
                      (dict(table=True), True)):
         seen.clear()
         task._path_clear(path, **kw)
         assert set(seen) == {want}, kw
+
+
+# -- the hull rule (leader 2026-11-02 12:05) ----------------------------------------------------------
+
+
+def test_hull_to_box_distance_by_gjk():
+    def cube(c, h):
+        return [(c[0] + sx * h, c[1] + sy * h, c[2] + sz * h) for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+    lo, hi = (0, 0, 0), (1, 1, 1)
+    d = collision.hull_box_distance
+    assert d(cube((2.5, 0.5, 0.5), 0.5), lo, hi) == pytest.approx(1.0)
+    assert d(cube((1.3, 1.4, 0.5), 0.1), lo, hi) == pytest.approx(math.hypot(0.2, 0.3))  # past an edge
+    assert d(cube((1.2, 1.2, 1.2), 0.1), lo, hi) == pytest.approx(math.sqrt(3) * 0.1)  # past a corner
+    assert d(cube((0.5, 0.5, 0.5), 0.1), lo, hi) == 0.0 and d(cube((1.05, 0.5, 0.5), 0.1), lo, hi) == 0.0
+    # A tilted plank whose corner, not a face, is nearest: 45 deg about z, corner at x = 1.1.
+    r = 0.1 / math.sqrt(2)
+    plank = [(1.2 + sx * r - sy * r, 0.5 + sx * r + sy * r, 0.5 + sz * 0.05) for sx in (-1, 1) for sy in (-1, 1)
+             for sz in (-1, 1)]
+    assert d(plank, lo, hi) == pytest.approx(min(p[0] for p in plank) - 1.0)
+
+
+def test_with_hulls_the_fixture_is_checked_on_them_at_2_mm_and_the_capsules_only_keep_the_arm_off_itself(tmp_path):
+    c = cs.load_sim_like_with_hulls()
+    task = drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
+    assert [h.name for h in c.robot.hulls][:3] == ["joint1", "joint3", "joint4"] and "joint1" in c.robot.still
+    q = c.look_pose_deg
+    t = c.chain.frames(q)["joint6_flange"]
+    gb = [kinematics.apply(t, v) for v in next(h for h in c.robot.hulls if h.name == "gripper_base").vertices]
+    low = min(gb, key=lambda p: p[2])
+    post = lambda gap: [("post", (low[0] - 0.003, low[1] - 0.003, 0.0), (low[0] + 0.003, low[1] + 0.003, low[2] - gap))]
+    assert task._robot_clear(q, post(0.0025), "all") is None
+    assert task._robot_clear(q, post(0.0015), "all") == "gripper_base 1.5 mm from the post"
+
+
+def test_with_hulls_the_pads_skip_only_the_handle_they_pinch(tmp_path):
+    c = cs.load_sim_like_with_hulls()
+    task = drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
+    seen = []
+    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now": seen.append(near)
+    q = c.look_pose_deg
+    task._path_clear([q, q], skip="r1c1", at_handle=True)
+    assert seen[-1] == {"handle of r1c1"}
+    task.opening["r1c1"] = 0.1
+    task._path_clear([q, q], grasp_in="r1c1")
+    assert seen[-1] == {"r1c1 front", "r1c1 floor", "r1c1 side wall", "r1c1 back wall"}
+    task._path_clear([q, q], table=True)
+    assert seen[-1] == {"table"}
+
+
+def test_a_find_with_hulls_and_capsules_hands_the_cone_over(link, camera, teleporting, tmp_path, monkeypatch):
+    """The whole find on the hull rule. Without the pads' hulls: the v2 grip in this scene opens the pads
+    above and below a handle, 0.3 mm from the next row's handle (why v3 grips differently); and in r2c2,
+    one of the drawers whose v2 grip keeps the hand 2 mm off the table and the base."""
+    from test_drawers import SIM_OBJECTS, run
+    no_pads = [h for h in cs.SYNTH_HULLS if h["name"] not in ("gripper_left3", "gripper_right3")]
+    monkeypatch.setattr(cs, "load", lambda: cs.load_sim_like_with_capsules(dict(cs.SYNTH_CAPSULES, hulls=no_pads)))
+    cone = dict(SIM_OBJECTS["yellow_cone"], drawer="r2c2", xy=[0.289, -0.081])
+    result, world, _ = run(link, camera, teleporting, tmp_path, objects={"yellow_cone": cone}, order=["r2c2"])
+    assert result["ok"] is True, result
+    assert world.in_handover("yellow_cone") and world.all_shut()
+
+
+def test_a_pad_hull_sits_where_the_jaw_is_open_to(tmp_path):
+    """v3's grips hold the jaw at preshape 56 (33.8 mm) by the handles 16 mm apart: a pad hull swept over
+    the whole travel touches the next handle, the pad itself does not. A pad given shut plus its travel
+    sits at the opening last commanded, swept only while that is unknown."""
+    pad = {"name": "gripper_left3", "frame": "joint6_flange", "vertices_m": [[0, 0, 0], [0.01, 0, 0], [0, 0.01, 0.02]],
+           "travel_axis": [-2.0, 0, 0], "travel_m": 0.0131}
+    caps = dict(cs.SYNTH_CAPSULES, hulls=[pad])
+    c = cs.load_sim_like_with_capsules(caps)
+    (h,) = c.robot.hulls
+    assert h.travel_axis == (-1.0, 0.0, 0.0) and h.travel_m == 0.0131
+    shut, half, swept = h.at(0.0)[0], h.at(0.5)[0], h.at(None)[0]
+    assert shut[1] == (0.01, 0.0, 0.0) and half[1] == pytest.approx((0.01 - 0.00655, 0.0, 0.0))
+    assert len(swept) == 6 and min(p[0] for p in swept) == pytest.approx(-0.0131)
+    task = drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
+    assert task._jaw_open is None and task._jaw_at(56) == pytest.approx(0.56) and task._jaw_at(100) == 1.0
+    q = c.look_pose_deg
+    t = c.chain.frames(q)["joint6_flange"]
+    tip = kinematics.apply(t, (-0.0131, 0.0, 0.0))  # the vertex at (0, 0, 0), fully open
+    post = [("post", tuple(x - 0.001 for x in tip), tuple(x + 0.001 for x in tip))]
+    assert "gripper_left3" in task._robot_clear(q, post, (), jaw=1.0)
+    assert task._robot_clear(q, post, (), jaw=0.0) is None
+    assert "gripper_left3" in task._robot_clear(q, post, ())  # unknown: swept

@@ -425,3 +425,28 @@ def with_side_top_handles(d, tilt_deg=10.0):
 
 def load_sim_like_side_top():
     return calib.from_dict(with_side_top_handles(sim_like_dict()), "cabinet_scene.py (sim-scene's side/top layout)")
+
+
+def _corners(lo, hi):
+    return [[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
+
+
+#: Fake hulls in calib v3.1's ``robot_collision.hulls`` format: each collider's URDF hull bounding box as
+#: its 8 corners (frames as the capsules). sim-scene's own hulls replace these when v3.1 lands.
+SYNTH_HULLS = [
+    {"name": "joint1", "frame": "joint1", "vertices_m": _corners((-0.055, -0.075, 0.0), (0.055, 0.075, 0.1097))},
+    {"name": "joint3", "frame": "joint3", "vertices_m": _corners((-0.132, -0.024, 0.0298), (0.024, 0.024, 0.0853))},
+    {"name": "joint4", "frame": "joint4", "vertices_m": _corners((-0.1152, -0.0216, -0.0224), (0.0216, 0.0216, 0.0354))},
+    {"name": "gripper_base", "frame": "joint6_flange",
+     "vertices_m": _corners((-0.0279, -0.0443, 0.0186), (0.0334, 0.0279, 0.0809))},
+    {"name": "camera_flange", "frame": "joint6_flange",
+     "vertices_m": _corners((-0.0511, -0.0192, 0.0019), (0.0192, 0.0511, 0.0181))},
+    {"name": "gripper_left3", "frame": "joint6_flange",
+     "vertices_m": _corners((-0.0279, -0.0285, 0.0863), (-0.008, -0.0085, 0.1125))},
+    {"name": "gripper_right3", "frame": "joint6_flange",
+     "vertices_m": _corners((0.008, 0.0085, 0.0863), (0.0279, 0.0285, 0.1125))},
+]
+
+
+def load_sim_like_with_hulls():
+    return load_sim_like_with_capsules(dict(SYNTH_CAPSULES, hulls=SYNTH_HULLS))

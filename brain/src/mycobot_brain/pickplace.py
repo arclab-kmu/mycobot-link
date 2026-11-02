@@ -87,6 +87,9 @@ class Settings:
     #: the hand bodies off the scene while they grasp (handle grip/pull/push, in-drawer pick/place):
     #: sim-scene checks those phases at 2 mm, and the brain uses the same rule (leader 2026-11-02)
     hand_margin_m: float = 0.002
+    #: the colliders' exact hulls off the scene, when the calib has them (leader 2026-11-02 12:05, the
+    #: rule sim-scene's D0 checks too); capsules then only keep the arm off itself
+    hull_margin_m: float = 0.002
     check_step_deg: float = collision.CHECK_STEP_DEG
 
 
@@ -128,6 +131,7 @@ class PickPlace:
         self.enabled = False
         self._vlm_n = 0
         self._seq: Optional[int] = None
+        self._jaw_open: Optional[float] = None  # how far open the jaw was last commanded; None: not yet
 
     # -- the sequence --------------------------------------------------------
 
@@ -438,16 +442,22 @@ class PickPlace:
         return None
 
     def _robot_clear(self, q: Sequence[float], boxes: Sequence[Tuple[str, Sequence[float], Sequence[float]]],
-                     fingers_near: Any = (), grasping: bool = False) -> Optional[str]:
+                     fingers_near: Any = (), grasping: bool = False, jaw: Any = "now") -> Optional[str]:
         """None if at ``q`` the listed link pairs and every moving link and ``boxes`` (name, lo, hi) keep
         ``robot_margin_m`` apart; the finger links may come closer to the boxes in ``fingers_near``
-        (``all``: every box), and while ``grasping`` the hand bodies to ``hand_margin_m`` of any box."""
+        (``all``: every box), and while ``grasping`` the hand bodies to ``hand_margin_m`` of any box. The pads'
+        hulls sit at ``jaw`` (0 shut .. 1 open; "now": as last commanded; None: swept over the travel)."""
         robot, m = self.calib.robot, self.s.robot_margin_m
         assert robot is not None
         placed = robot.place(self.calib.chain, q)
         why = robot.self_hit(placed, m)
         if why is not None:
             return why
+        if robot.hulls:
+            hit = robot.hull_gaps(self.calib.chain, q, boxes, self.s.hull_margin_m, lambda name, box: (
+                name in robot.fingers and (fingers_near == "all" or box in fingers_near)),
+                jaw=self._jaw_open if jaw == "now" else jaw)
+            return None if hit is None else f"{hit[0]} {hit[2] * 1000:.1f} mm from the {hit[1]}"
         for p in placed:
             name, r = p.capsule.name, p.capsule.radius
             if name in robot.still:
@@ -499,7 +509,15 @@ class PickPlace:
                     return
                 raise PickPlaceError(f"{phase}: still {err:.1f} deg from the waypoint after {self.s.arrive_timeout:g} s")
 
+    def _jaw_at(self, value: Optional[int]) -> Optional[float]:
+        """How far open (0..1) the jaw is at gripper ``value``; the sim's map is linear."""
+        if value is None:
+            return None
+        o, c = self.calib.gripper_open, self.calib.gripper_closed
+        return min(max((value - c) / (o - c), 0.0), 1.0) if o != c else None
+
     def _gripper(self, value: int, action: str) -> None:
+        self._jaw_open = self._jaw_at(value)
         self.link.gripper(value, self.s.gripper_speed)
         self.log.event("gripper", action=action, value=value)
         time.sleep(self.s.gripper_wait)

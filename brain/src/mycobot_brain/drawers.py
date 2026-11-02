@@ -399,10 +399,14 @@ class DrawerTask(PickPlace):
         # A tipped or turned gripper leans its back (and the camera) towards the cabinet face. The drawer
         # is at s0 on the way in, moves with the hand on the pull (and the push), and is at s1 on the way out.
         at0, at1 = {**self.opening, d.id: s0}, {**self.opening, d.id: s1}
+        c = self.calib
+        release = self._jaw_at(stage.release if stage.release is not None else c.gripper_open)
+        preshape = self._jaw_at(stage.preshape) if stage.preshape is not None else release
+        shut = self._jaw_at(stage.close if stage.close is not None else c.gripper_closed)
         legs: List[Tuple[List[List[float]], Dict[str, Any]]] = [
-            ([pre] + to_handle, dict(openings=at0)),
-            ([to_handle[-1]] + pull, dict(openings=at0, moving=d.id)),
-            ([pull[-1]] + back, dict(openings=at1))]
+            ([pre] + to_handle, dict(openings=at0, jaw=preshape)),
+            ([to_handle[-1]] + pull, dict(openings=at0, moving=d.id, jaw=shut)),
+            ([pull[-1]] + back, dict(openings=at1, jaw=release))]
         for leg, ctx in legs:
             hit = self._path_clear(leg, skip=d.id, at_handle=True, **ctx)
             if hit:
@@ -415,8 +419,9 @@ class DrawerTask(PickPlace):
             # The pre-grasp at s0 is also where a push to s0 backs off to.
             for name, q, openings in ((f"standoff at {s0 * 1000:.0f} mm", pre, at0),
                                       (f"standoff at {s1 * 1000:.0f} mm", back[-1], at1)):
-                for there, other in ((look, q), (q, look)):
-                    vias, _, why = self._route(there, other, None, openings=openings)
+                # In with the jaw at preshape, out (after letting go) at release.
+                for there, other, jaw in ((look, q, preshape), (q, look, release)):
+                    vias, _, why = self._route(there, other, None, openings=openings, jaw=jaw)
                     if vias is None:
                         raise PickPlaceError(f"cabinet look <-> {name}: the {why}")
         return HandlePlan(stage=stage, frames={s0: (a, j), s1: (a1, j1)}, free=free, seeds={s0: pre, s1: back[-1]},
@@ -885,7 +890,8 @@ class DrawerTask(PickPlace):
 
     def _path_clear(self, path: Sequence[Sequence[float]], skip: Optional[str] = None, at_handle: bool = False,
                     grasp_in: Optional[str] = None, table: bool = False, moving: Optional[str] = None,
-                    openings: Optional[Dict[str, float]] = None, points: bool = True) -> Optional[str]:
+                    openings: Optional[Dict[str, float]] = None, points: bool = True,
+                    jaw: Any = "now") -> Optional[str]:
         """None if all along ``path`` (its first entry is where the arm starts; checked every
         ``check_step_deg``) the TCP, the pad tips and the camera stay out of the cabinet and of open
         drawers (but ``skip``), the open fingers off the handles, and, with the calib's capsules, every
@@ -895,10 +901,14 @@ class DrawerTask(PickPlace):
         come closer to ``grasp_in``'s tray and (``table``) the table, where they grasp and let go; there
         and at a handle the hand bodies keep ``hand_margin_m`` off the scene. The drawer
         ``moving`` goes with the hand (a pull or a push) and is left out. ``openings`` instead of where
-        the drawers are now, for a plan. ``points=False`` leaves out the TCP / pad tip / camera / finger
+        the drawers are now, for a plan, and ``jaw`` (0..1) for the jaw as it will be then. ``points=False`` leaves out the TCP / pad tip / camera / finger
         points, which were made for joint moves: a straight line in (a descent past the cabinet top, say)
         is planned with its own clearances, and the capsules cover it."""
         fx, chain, m = self.fx, self.calib.chain, self.s.body_clear_m
+        hulls = self.calib.robot is not None and bool(self.calib.robot.hulls)
+        # With the colliders' hulls the brain checks exactly the shared rule (leader 12:05): the point
+        # checks below were stand-ins for a robot the calib did not describe.
+        points = points and not hulls
         openings = {k: v for k, v in (self.opening if openings is None else openings).items() if k != moving}
         lo, hi = (fx.box_min, fx.box_max) if at_handle else fx.body_box()
         boxes = [("cabinet", lo, hi)]
@@ -915,6 +925,8 @@ class DrawerTask(PickPlace):
         grasping = at_handle or grasp_in is not None or table
         scene: List[Tuple[str, Sequence[float], Sequence[float]]] = []
         near: Any = "all" if at_handle else ({"table"} if table else set())
+        if at_handle and hulls:
+            near = {f"handle of {skip}"}  # the pads pinch that handle; the hulls keep 2 mm off the rest
         if self.calib.robot is not None:
             scene = [("table", (-9.0, -9.0, -9.0), (9.0, 9.0, self.calib.table_z)), ("cabinet", fx.box_min, fx.box_max)]
             scene += [(f"handle of {d_id}", k_lo, k_hi) for d_id, k_lo, k_hi in knobs]
@@ -926,7 +938,7 @@ class DrawerTask(PickPlace):
                         near |= {name for name, _, _ in parts}
         for q in collision.densify(path, self.s.check_step_deg):
             if not points:
-                why = self._robot_clear(q, scene, near, grasping) if scene else None
+                why = self._robot_clear(q, scene, near, grasping, jaw) if scene else None
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
                 continue
@@ -948,7 +960,7 @@ class DrawerTask(PickPlace):
                     if _in_box(pt, k_lo, k_hi, m):
                         return f"a finger at {_r(pt, 3)} on the handle of {d_id}"
             if scene:
-                why = self._robot_clear(q, scene, near, grasping)
+                why = self._robot_clear(q, scene, near, grasping, jaw)
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
         return None
