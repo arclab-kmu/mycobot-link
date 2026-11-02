@@ -107,6 +107,11 @@ class DrawerTask(PickPlace):
         #: sim-scene's verified routes between the views (calib v3.2), played instead of planning
         self._routes: List[Tuple[str, TaughtLeg]] = [(f"{d.id} {name}", leg) for d in self.fx.drawers.values()
                                                      if d.taught for name, leg in d.taught.routes.items()]
+        #: objects standing where the brain knows they are - let go of, or seen waiting on the mat for a put:
+        #: (name, x, y, support z, shape, drawer id or None, that drawer's opening then). Every move after
+        #: is checked against them (:meth:`_known_boxes`); D3 v3.2 s502_e: r0c0's taught close and the move
+        #: off it tipped the cone just handed over (leader 16:58).
+        self._known: List[Tuple[str, float, float, float, Shape, Optional[str], float]] = []
         #: how far the open fingers reach out from the TCP axis: the calib's finger capsules, else the setting.
         self._finger_reach = self.s.finger_half_m
         robot = self.calib.robot
@@ -133,6 +138,8 @@ class DrawerTask(PickPlace):
         if fk is not None:
             self.log.event("taught", drawers=sorted(d for d, x in self.fx.drawers.items() if x.taught),
                            routes=len(self._routes), fk_vs_calib_tcp_max_mm=round(fk, 3))
+            # Played as given, so only flagged: the taught legs that reach over the handover mat.
+            self.log.event("guard", what="calib", flagged=self._guard_calib())
         if s.execute:
             self.link.enable()
             self.enabled = True
@@ -242,6 +249,8 @@ class DrawerTask(PickPlace):
             return {"ok": False, "why": f"no {desc} on the table: {found['seen']}"}
         start = self._estimate(found["pick"], q, c.table_z + shape.height / 2, "pick", "table")
         d = fx.drawer(cmd["drawer"])
+        # It waits on the mat while the drawer opens: the same guard as for one let go (leader 16:58).
+        waiting = self._leave(shape, (start[0], start[1], c.table_z), None, how="waiting")
         look = self._open_and_look(d, None)
         occupied = [self._object_xyz(d, o, look["angles"]) for o in look["objects"]]
         spot, margin = self._put_spot(d, [p for p in occupied if p is not None], shape, start)
@@ -250,6 +259,7 @@ class DrawerTask(PickPlace):
             return {"ok": False, "why": f"no room the arm reaches for a {desc} in {d.id}"}
         self.log.event("spot", drawer=d.id, xyz=_r(spot, 4), occupied=[_r(p, 4) for p in occupied if p],
                        reach_margin_m=round(margin, 3))
+        self._forget(waiting)  # the gripper goes to it now
         for attempt in range(1, self.s.attempts + 1):
             try:
                 self._pick_up(start, c.table_z, shape, desc, "table", jaw=self._put_yaw(start, spot, shape))
@@ -548,6 +558,10 @@ class DrawerTask(PickPlace):
         why = self._path_clear([here] + path, points=False, **self._ctx)
         if why is not None:
             self.log.event("taught_check", phase=phase, why=why)
+        # On its own as well: the scene check above stops at its first finding, which may hide this one.
+        hit = self._guard_path([here] + path, self._ctx.get("moving"), self._ctx.get("released"))
+        if hit is not None:
+            self.log.event("guard", what="taught", phase=phase, why=hit)
         self._send(path, phase, leg.speed or speed or self.s.speed)
 
     def _taught_route(self, here: Sequence[float], goal: Sequence[float],
@@ -903,10 +917,13 @@ class DrawerTask(PickPlace):
             self._phase(f"lower: {where}")
             self._line((xyz[0], xyz[1], release_z), f"lower: {where}", DOWN, jaw)
             self._gripper(c.gripper_open, "open")
+            # From here every move keeps off it; the open fingers only on the way back up, beside it.
+            left = self._leave(shape, (xyz[0], xyz[1], surface_z), drawer)
             self._phase("retreat")
-            self._line((xyz[0], xyz[1], carry), "retreat", DOWN, jaw)
-            if via is not None:
-                self._line((via[0], via[1], carry), "retreat: out of the drawer", DOWN, jaw)
+            with self._near(released=left):
+                self._line((xyz[0], xyz[1], carry), "retreat", DOWN, jaw)
+                if via is not None:
+                    self._line((via[0], via[1], carry), "retreat: out of the drawer", DOWN, jaw)
 
     def _carry(self, goal: Vec, phase: str, floor: float) -> None:
         """Holding something, to ``goal``: a joint move where it is clear, else a slow straight line, else
@@ -919,6 +936,22 @@ class DrawerTask(PickPlace):
         q = self._ik(here, goal, DOWN)
         joint = kinematics.joint_path(here, q, self.s.max_step)
         why = self._path_clear([here] + joint, **self._ctx) or self._dips([here, q], floor)
+        if why is not None:
+            # Far round the base (v3.3's mat behind it), the solution nearest the seed can be the arm leant
+            # back over the base, and the joint move there folds the forearm onto the fingers; from J1 turned
+            # to the goal's bearing first it is the ordinary one (D0 v3.3, put r0c1 beside pair0).
+            hold = self._held(None)
+            for seed in kinematics.bearing_seeds(chain, here, goal, hold=hold):
+                try:
+                    q2 = kinematics.solve_ik(chain, seed, goal, approach=DOWN, hold=hold)
+                except IKError:
+                    continue
+                path2 = kinematics.joint_path(here, q2, self.s.max_step)
+                if (self._path_clear([here] + path2, **self._ctx) or self._dips([here, q2], floor)) is None:
+                    self.log.event("carry", phase=phase, how="joint move, J1 turned first in the IK",
+                                   why=f"nearest solution: {why}")
+                    q, joint, why = q2, path2, None
+                    break
         if why is None:
             self._send(joint, phase, self.s.speed)
             return
@@ -1211,7 +1244,7 @@ class DrawerTask(PickPlace):
     def _path_clear(self, path: Sequence[Sequence[float]], skip: Optional[str] = None, at_handle: bool = False,
                     grasp_in: Optional[str] = None, table: bool = False, moving: Optional[str] = None,
                     openings: Optional[Dict[str, float]] = None, points: bool = True,
-                    jaw: Any = "now") -> Optional[str]:
+                    jaw: Any = "now", released: Optional[str] = None) -> Optional[str]:
         """None if all along ``path`` (its first entry is where the arm starts; checked every
         ``check_step_deg``) the TCP, the pad tips and the camera stay out of the cabinet and of open
         drawers (but ``skip``), the open fingers off the handles, and, with the calib's capsules, every
@@ -1229,6 +1262,9 @@ class DrawerTask(PickPlace):
         # With the colliders' hulls the brain checks exactly the shared rule (leader 12:05): the point
         # checks below were stand-ins for a robot the calib did not describe.
         points = points and not hulls
+        # Every link keeps object_margin_m off the objects the brain knows stand somewhere, the fingers
+        # excepted from the one just ``released``, which they are still beside.
+        objects = self._known_boxes(self.opening if openings is None else openings, moving)
         openings = {k: v for k, v in (self.opening if openings is None else openings).items() if k != moving}
         lo, hi = (fx.box_min, fx.box_max) if at_handle else fx.body_box()
         boxes = [("cabinet", lo, hi)]
@@ -1256,9 +1292,11 @@ class DrawerTask(PickPlace):
                     scene += parts
                     if d_id == grasp_in and near != "all":
                         near |= {name for name, _, _ in parts}
+            if released is not None and near != "all":
+                near = set(near) | {released}
         for q in collision.densify(path, self.s.check_step_deg):
             if not points:
-                why = self._robot_clear(q, scene, near, grasping, jaw) if scene else None
+                why = self._robot_clear(q, scene, near, grasping, jaw, objects) if scene else None
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
                 continue
@@ -1280,10 +1318,81 @@ class DrawerTask(PickPlace):
                     if _in_box(pt, k_lo, k_hi, m):
                         return f"a finger at {_r(pt, 3)} on the handle of {d_id}"
             if scene:
-                why = self._robot_clear(q, scene, near, grasping, jaw)
+                why = self._robot_clear(q, scene, near, grasping, jaw, objects)
                 if why is not None:
                     return f"{why} at {_r(q, 1)}"
         return None
+
+    # -- what the brain has left standing ------------------------------------------------
+
+    def _leave(self, shape: Shape, at: Sequence[float], drawer: Optional[Drawer], how: str = "set-down") -> str:
+        """Note that an object of ``shape`` stands at ``at`` (x, y, support z), in ``drawer`` as it is open
+        now or on the table; returns its name, as the checker reports it."""
+        where = f"in {drawer.id}" if drawer is not None else "on the mat"
+        name = f"{how} {shape.name} {where}"
+        self._known.append((name, float(at[0]), float(at[1]), float(at[2]), shape,
+                            drawer.id if drawer is not None else None,
+                            self.opening[drawer.id] if drawer is not None else 0.0))
+        self.log.event("guard", what=how, object=name, xyz=_r(at, 4))
+        return name
+
+    def _forget(self, name: str) -> None:
+        self._known = [k for k in self._known if k[0] != name]
+
+    def _known_boxes(self, openings: Dict[str, float], moving: Optional[str] = None
+                     ) -> List[Tuple[str, Vec, Vec]]:
+        """Each known object as a box: its width square (a cylinder's or cone's corners too), from its
+        support to its top; one in a drawer goes where that drawer is in ``openings``, and one in the drawer
+        ``moving`` with the hand is left out (it goes with it)."""
+        a = self.fx.pull_axis
+        out = []
+        for name, x, y, z, shape, d_id, opening0 in self._known:
+            if d_id is not None:
+                if d_id == moving:
+                    continue
+                shift = openings.get(d_id, self.opening[d_id]) - opening0
+                x, y = x + shift * a[0], y + shift * a[1]
+            h = shape.width / 2
+            out.append((name, (x - h, y - h, z), (x + h, y + h, z + shape.height)))
+        return out  # type: ignore[return-value]
+
+    def _guard_path(self, path: Sequence[Sequence[float]], moving: Optional[str] = None,
+                    released: Optional[str] = None) -> Optional[str]:
+        """The known objects alone along ``path``: why not, if a link comes within ``object_margin_m``."""
+        objects = self._known_boxes(self.opening, moving)
+        if not objects or self.calib.robot is None:
+            return None
+        near = {released} if released is not None else set()
+        for q in collision.densify(path, self.s.check_step_deg):
+            why = self._object_hit(q, objects, near, "now")
+            if why is not None:
+                return f"{why} at {_r(q, 1)}"
+        return None
+
+    def _guard_calib(self) -> List[Dict[str, Any]]:
+        """The taught legs that come within ``object_margin_m`` of the tallest catalogue object standing
+        with its centre anywhere on the handover mat (the calib's in-zone rule), pads swept over their
+        travel: flagged when the run starts, since taught legs are played as given (leader 16:58)."""
+        fx, robot = self.fx, self.calib.robot
+        if robot is None or not fx.shapes or not any(d.taught for d in fx.drawers.values()):
+            return []
+        r = max(s.width for s in fx.shapes.values()) / 2
+        top = max(s.height for s in fx.shapes.values())
+        (hx, hy), (sx, sy) = fx.handover_center, fx.handover_size
+        z = self.calib.table_z
+        zone = [("handover zone", (hx - sx / 2 - r, hy - sy / 2 - r, z), (hx + sx / 2 + r, hy + sy / 2 + r, z + top))]
+        out = []
+        for d in sorted(fx.drawers.values(), key=lambda d: d.id):
+            if not d.taught:
+                continue
+            for name, leg in d.taught.legs():
+                path = ([list(leg.start)] if leg.start is not None else []) + [list(q) for q in leg.q]
+                for q in collision.densify(path, self.s.check_step_deg):
+                    why = self._object_hit(q, zone, (), None)
+                    if why is not None:
+                        out.append({"leg": f"{d.id} {name}", "why": why})
+                        break
+        return out
 
     def _dips(self, path: Sequence[Sequence[float]], floor: Optional[float]) -> Optional[str]:
         """Why not, if the TCP goes below ``floor`` anywhere along ``path``."""
@@ -1325,6 +1434,10 @@ class DrawerTask(PickPlace):
         s, g = list(start), list(goal)
         looks = [(n, list(v)) for n, v in (("cabinet look", self.fx.cabinet_look_pose_deg),
                                            ("table look", self.calib.look_pose_deg)) if v]
+        if self._holding:
+            # No wrist roll with an object in hand (3c40c7a): by a look pose, J6 stays where it is. v3.3's
+            # mat behind the base sent a carry from r2c2 by the table look, J6 +35 -> -29 -> +35 (D0).
+            looks = [(n, [*v[:5], s[5]]) for n, v in looks]
         ways: List[Tuple[str, List[List[float]]]] = [("straight", [])]
         ways += [(f"by the {n}", [v]) for n, v in looks]
         ways += [("J1 last", [[s[0], *g[1:]]]), ("J1 first", [[g[0], *s[1:]]])]

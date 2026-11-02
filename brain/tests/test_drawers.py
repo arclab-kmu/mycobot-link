@@ -469,3 +469,32 @@ def test_a_put_spot_is_one_the_arm_reaches_at_the_carry_height(tmp_path):
         if task._reaches(p, least) and task._reaches(task._front_of(d, p, cone.width), least) \
                 and task._reaches(p, release_z):
             assert g < gap + 0.005
+
+
+def test_the_brain_keeps_off_what_it_set_down(tmp_path):
+    """D3 v3.2 s502_e (ffe973e): r0c0's taught close and the brain's move off it tipped the cone just
+    handed over. Every move after a set-down keeps object_margin_m off the object, the open fingers
+    excepted on the way back up from it; one left in a drawer goes where the drawer goes."""
+    scene = cs.load_sim_like_with_hulls()
+    task = drawers.DrawerTask(None, None, scene, None, pickplace.RunLog(tmp_path / "t"), drawers.DrawerSettings())
+    fx, chain, cone = scene.fixture, scene.chain, scene.fixture.shapes["cone"]
+    hx, hy = fx.handover_center
+    at = kinematics.solve_ik(chain, scene.look_pose_deg, (hx, hy, scene.table_z + cone.grasp_height),
+                             approach=pickplace.DOWN)
+    up = kinematics.solve_ik(chain, at, (hx, hy, scene.table_z + 0.12), approach=pickplace.DOWN)
+    task._jaw_open = 1.0
+    assert task._path_clear([up, at], points=False) is None  # nothing there yet
+    name = task._leave(cone, (hx, hy, scene.table_z), None)
+    assert name == "set-down cone on the mat"
+    why = task._path_clear([up, at], points=False)
+    assert why is not None and "set-down cone on the mat" in why
+    assert task._path_clear([at, up], points=False, released=name) is None  # the retreat from it
+    task._forget(name)
+    assert task._path_clear([up, at], points=False) is None
+    # In a drawer: it moves with the drawer, and the drawer moving with the hand takes it along.
+    d = fx.drawers["r1c1"]
+    task.opening[d.id] = fx.open_m
+    inside = task._leave(cone, (0.2, 0.0, d.floor_z), d)
+    (box,) = task._known_boxes({d.id: 0.0})
+    assert box[0] == inside and box[1][0] == pytest.approx(0.2 - cone.width / 2 + fx.open_m)  # pushed in along +x
+    assert task._known_boxes({d.id: 0.0}, moving=d.id) == []

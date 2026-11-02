@@ -7,6 +7,9 @@ Pass, from the sim's truth before and after the run:
   find, the yellow cone in the handover zone; take, one object that was in the
   named drawer, in the handover zone; put, the object that stood in the
   handover zone, in the named drawer;
+- that object upright: its axis within UPRIGHT_DEG of vertical, from its truth quaternion (leader 16:58,
+  after D3 v3.2 s502_e: a taught close tipped the cone just handed over). A sphere has no up and is
+  not held to it (its tilt is printed);
 - every other object in the drawer it started in;
 - with ``--audit`` (sim-scene's ``collision_audit.py --out`` JSON, any number of them): zero colliding
   segments for the run, the arm against itself and the scene (BOARD 2026-11-02). A run the audits do
@@ -21,12 +24,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 SHUT_M = 0.003  # D1 shut its drawers to <= 0.7 mm
 REST_MPS = 0.02  # the bridge's at_rest: resting cylinders and cones chatter near 0.01 m/s
+UPRIGHT_DEG = 15.0
+
+
+def tilt_deg(quat_wxyz: List[float]) -> float:
+    """Angle between the body's z axis and the world's, from a unit quaternion (w, x, y, z)."""
+    w, x, y, z = quat_wxyz
+    return math.degrees(math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))))
 
 
 def _moved(before: Dict[str, Any], after: Dict[str, Any], kind: str, drawer: str) -> Optional[str]:
@@ -57,6 +68,8 @@ def score(d: Path, audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     else:
         placed = bool(o and o["in_drawer"] == drawer)
     at_rest = bool(o and o["speed_mps"] < REST_MPS)
+    tilt = tilt_deg(o["quat_wxyz"]) if o and o.get("quat_wxyz") else None
+    upright = bool(o) and (o["shape"] == "sphere" or (tilt is not None and tilt < UPRIGHT_DEG))
     open_after = {k: v["open_m"] for k, v in after["drawers"].items() if v["open_m"] >= SHUT_M}
     strays = [i for i, b in before["objects"].items()
               if i != oid and after["objects"][i]["in_drawer"] != b["in_drawer"]]
@@ -68,9 +81,10 @@ def score(d: Path, audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     clean = audit is None or collided == 0
     return {
         "run": d.name, "kind": kind, "seed": meta["seed"], "drawer": drawer or None,
-        "pass": placed and at_rest and not open_after and not strays and clean,
+        "pass": placed and at_rest and upright and not open_after and not strays and clean,
         "collision_segments": collided, "audit_row": None if audit is None else audit.get(d.name),
-        "object": oid, "object_after": o, "placed": placed, "at_rest": at_rest,
+        "object": oid, "object_after": o, "placed": placed, "at_rest": at_rest, "upright": upright,
+        "tilt_deg": None if tilt is None else round(tilt, 1),
         "open_after": open_after, "max_open_m": max(v["open_m"] for v in after["drawers"].values()),
         "strays": {i: [before["objects"][i]["in_drawer"], after["objects"][i]["in_drawer"]] for i in strays},
         "brain_ok": result.get("ok"), "why": result.get("why"), "seconds": result["t"],
@@ -104,7 +118,8 @@ def main() -> None:
         r = rows[-1]
         o = r["object_after"] or {}
         print(f"{r['run']}: {'PASS' if r['pass'] else 'FAIL'} {r['object']} -> in_drawer={o.get('in_drawer')} "
-              f"in_handover={o.get('in_handover')} v={o.get('speed_mps')} | max open {r['max_open_m']:.4f} m, "
+              f"in_handover={o.get('in_handover')} v={o.get('speed_mps')} tilt={r['tilt_deg']} deg"
+              f"{'' if r['upright'] else ' NOT UPRIGHT'} | max open {r['max_open_m']:.4f} m, "
               f"strays {r['strays'] or 'none'} | brain_ok={r['brain_ok']} opened {r['drawers_opened']} "
               f"{r['seconds']:.1f} s, {r['vlm_calls']} VLM calls"
               + ("" if audit is None else f" | collision segments {r['collision_segments']}"))

@@ -144,6 +144,15 @@ def run_case(calib_path: str, case: dict, out_dir: str) -> dict:
             rec.update(slow_turns=[e.get("deg") for e in ev if e["event"] == "slow_turn"],
                        put_yaw_deg=next((e.get("deg_off_pick_jaw") for e in ev if e["event"] == "put_yaw"), None),
                        held_j6_range_deg=round(max(j6) - min(j6), 2) if j6 else None)
+            # The set-down guard (leader 16:58): taught legs played near a known object (flagged, not
+            # refused), the brain's own moves it turned (a detour, or a carry another way) or refused.
+            marks = ("set-down ", "waiting ")
+            guard = [e for e in ev if e["event"] == "guard"]
+            rec.update(guard_calib_flags=next((len(e["flagged"]) for e in guard if e.get("what") == "calib"), None),
+                       guard_taught=[e["why"] for e in guard if e.get("what") == "taught"],
+                       guard_turned=[e.get("why") for e in ev if e["event"] in ("detour", "carry", "skip")
+                                     and any(m in str(e.get("why")) for m in marks)],
+                       guard_refused=any(m in str(result.get("why")) for m in marks))
             others_moved = [k for k in case.get("others", {}) if world.moved(k)]
             rec.update(ok=result.get("ok"), why=result.get("why"), object_where_wanted=where_ok,
                        all_shut=world.all_shut(), others_moved=others_moved, seconds=round(time.monotonic() - t0, 1),

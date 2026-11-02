@@ -258,7 +258,7 @@ def test_the_hand_keeps_2_mm_off_the_scene_only_while_it_grasps(tmp_path):
     assert task._robot_clear(q, post, "all", grasping=True) is None
     # Which moves count as grasping: at a handle, in the drawer or on the mat it grasps on; not a free move.
     seen = []
-    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now": seen.append(grasping)
+    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now", objects=(): seen.append(grasping)
     path = [q, q]
     for kw, want in ((dict(), False), (dict(at_handle=True, skip="r1c1"), True), (dict(grasp_in="r1c1"), True),
                      (dict(table=True), True)):
@@ -303,7 +303,7 @@ def test_with_hulls_the_pads_skip_only_the_handle_they_pinch(tmp_path):
     c = cs.load_sim_like_with_hulls()
     task = drawers.DrawerTask(None, None, c, None, pickplace.RunLog(tmp_path / "run"), drawers.DrawerSettings())
     seen = []
-    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now": seen.append(near)
+    task._robot_clear = lambda q, boxes, near, grasping=False, jaw="now", objects=(): seen.append(near)
     q = c.look_pose_deg
     task._path_clear([q, q], skip="r1c1", at_handle=True)
     assert seen[-1] == {"handle of r1c1"}

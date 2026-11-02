@@ -85,7 +85,9 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   `drawer_vlm.py` (command parse, cabinet view, what is in a drawer),
   `drawers.py` (`DrawerTask`, a `PickPlace` subclass: handle grips per the
   calib's stages (side pinch, then top-down) + straight pull/push, in-drawer
-  pick, put, handover, find loop; joint moves routed round what is in the way), `collision.py` (the calib's `robot_collision` capsules:
+  pick, put, handover, find loop; joint moves routed round what is in the way;
+  every move after a set-down keeps off the object, taught legs over the
+  handover mat flagged at the start), `collision.py` (the calib's `robot_collision` capsules:
   link pairs and links vs table/cabinet/handles/open trays, 5 mm, every 2 deg
   of every move), `cli.py`.
 - `camera-push/camera_push.py`: Jetson, Python 3.8 stdlib + `ffmpeg`. Grabs

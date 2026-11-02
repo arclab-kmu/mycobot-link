@@ -278,17 +278,68 @@ def solve_ik(
     ``jaw`` without ``approach`` fixes only the jaw axis: pads pinching two
     faces may turn about the line through them (a knob gripped top and bottom
     lets the gripper's heading drift as the drawer slides out).
+
+    Failing that, and J1 free, it starts again with J1 turned by the target's
+    bearing from the seed's: round the base, the damped steps do not get there
+    from a seed 100-170 deg of J1 away (calib v3.3's handover mat behind the
+    base, a drawer on the right, D0 2026-11-02). A seed that works is used as before.
     """
+    kw = dict(tool=tool, approach=approach, jaw=jaw, either_jaw=either_jaw, hold=hold, limits=limits,
+              margin=margin, tol_m=tol_m, tol_deg=tol_deg, iters=iters, damping=damping)
+    try:
+        return _solve_seeded(chain, seed_deg, target, **kw)  # type: ignore[arg-type]
+    except IKError as exc:
+        err = exc
+    for seed in bearing_seeds(chain, seed_deg, target, tool, hold, limits, margin):
+        try:
+            return _solve_seeded(chain, seed, target, **kw)  # type: ignore[arg-type]
+        except IKError:
+            continue
+    raise err
+
+
+def bearing_seeds(chain: Chain, seed_deg: Sequence[float], target: Sequence[float], tool: str = "tcp",
+                  hold: Sequence[int] = (), limits: Sequence[Tuple[float, float]] = JOINT_LIMITS_DEG,
+                  margin: float = IK_MARGIN_DEG) -> List[List[float]]:
+    """``seed_deg`` with J1 turned so the tool's bearing from the base axis is the target's, either way
+    round that stays inside J1's limits; [] if J1 is held, the tool or target is on the axis, or the
+    bearings are within 20 deg."""
+    if 1 in hold:
+        return []
+    p = position(chain.pose(seed_deg, tool))
+    if math.hypot(p[0], p[1]) < 0.01 or math.hypot(target[0], target[1]) < 0.01:
+        return []
+    turn = math.degrees(math.atan2(target[1], target[0]) - math.atan2(p[1], p[0]))
+    turn = (turn + 180.0) % 360.0 - 180.0
+    if abs(turn) < 20.0:
+        return []
+    # Which way J1 turns the bearing in firmware degrees, from the chain itself.
+    nudged = position(chain.pose([seed_deg[0] + 1.0, *seed_deg[1:]], tool))
+    sign = 1.0 if (math.degrees(math.atan2(nudged[1], nudged[0]) - math.atan2(p[1], p[0])) + 180.0) % 360.0 - 180.0 > 0 \
+        else -1.0
+    lo, hi = limits[0][0] + margin, limits[0][1] - margin
+    out = []
+    for t in sorted((turn, turn - 360.0, turn + 360.0), key=abs):
+        j1 = seed_deg[0] + sign * t
+        if lo <= j1 <= hi:
+            out.append([j1, *seed_deg[1:]])
+    return out
+
+
+def _solve_seeded(chain: Chain, seed_deg: Sequence[float], target: Sequence[float], *, tool: str,
+                  approach: Optional[Sequence[float]], jaw: Optional[Sequence[float]], either_jaw: bool,
+                  hold: Sequence[int], limits: Sequence[Tuple[float, float]], margin: float, tol_m: float,
+                  tol_deg: float, iters: int, damping: float) -> List[float]:
     if jaw is not None and either_jaw:
         first = jaw if dot(column(chain.pose(seed_deg, tool), 0), jaw) >= 0 else tuple(-j for j in jaw)
         kw = dict(tool=tool, approach=approach, hold=hold, limits=limits, margin=margin, tol_m=tol_m,
                   tol_deg=tol_deg, iters=iters, damping=damping)
         try:
-            return _solve_ik(chain, seed_deg, target, jaw=first, **kw)
+            return _solve_ik(chain, seed_deg, target, jaw=first, **kw)  # type: ignore[arg-type]
         except IKError:
             if approach is None:
                 raise  # jaw only: the minimum-norm step from the seed already turns whichever way is shorter
-            return _solve_ik(chain, seed_deg, target, jaw=tuple(-j for j in first), **kw)
+            return _solve_ik(chain, seed_deg, target, jaw=tuple(-j for j in first), **kw)  # type: ignore[arg-type]
     return _solve_ik(chain, seed_deg, target, tool=tool, approach=approach, jaw=jaw, hold=hold, limits=limits,
                      margin=margin, tol_m=tol_m, tol_deg=tol_deg, iters=iters, damping=damping)
 

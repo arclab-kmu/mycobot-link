@@ -98,3 +98,20 @@ def test_line_path_keeps_the_tcp_on_the_line(calib):
         assert max(abs(a - b) for a, b in zip(q, prev)) <= 8.0 + 1e-9
         prev = q
     assert K.position(calib.chain.pose(path[-1], "tcp")) == pytest.approx((0.2, -0.08, 0.015), abs=5e-4)
+
+
+def test_ik_goes_round_the_base_from_a_seed_far_off_in_j1(calib):
+    """Calib v3.3 puts the handover mat behind the base (bearing ~120 deg) and drawers on the right (~-40):
+    from a seed at one, the damped steps stall short of the other; the retry turns J1 to the target's
+    bearing first. J6 held, as a carry holds it."""
+    chain = calib.chain
+    seed = K.solve_ik(chain, calib.look_pose_deg, (-0.10, 0.17, 0.02), approach=(0, 0, -1))
+    target = (0.10, -0.10, 0.18)
+    kw = dict(tool="tcp", approach=(0, 0, -1), jaw=None, either_jaw=True, hold=(6,), limits=K.JOINT_LIMITS_DEG,
+              margin=K.IK_MARGIN_DEG, tol_m=5e-4, tol_deg=0.5, iters=400, damping=0.03)
+    with pytest.raises(K.IKError):
+        K._solve_seeded(chain, seed, target, **kw)
+    q = K.solve_ik(chain, seed, target, approach=(0, 0, -1), hold=(6,))
+    assert K.position(chain.pose(q, "tcp")) == pytest.approx(target, abs=1e-3)
+    assert q[5] == pytest.approx(seed[5], abs=1e-6)
+    assert K.bearing_seeds(chain, seed, target, hold=(1,)) == []  # J1 held: no retry

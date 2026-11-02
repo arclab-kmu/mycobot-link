@@ -158,3 +158,26 @@ def test_one_way_taught_routes_are_chained(tmp_path):
     assert names == ["r2c1 tilted>topdown", "r2c1 topdown>cabinet_look"]
     assert [n for n, _ in task._taught_route(look, row["look_pose_deg"])] == ["r2c1 cabinet_look>tilted"]
     assert task._taught_route(look, [0.0] * 6) is None
+
+
+def test_taught_legs_over_the_handover_mat_are_flagged_when_the_run_starts(tmp_path):
+    """Taught legs are played as given (leader 12:24), so the guard only flags those reaching within
+    object_margin_m of the tallest object anywhere on the handover mat (leader 16:58): v3.2's r0c0/r0c1
+    legs over the mat at (0.10, 0.19) tipped a cone (D3 v3.2 s502_e). Here a made-up route down to 3 cm
+    over that mat; the made-up hulls."""
+    d = with_taught(cs.sim_like_dict(), {"r2c1"})
+    c = calib.from_dict(d)
+    look, (hx, hy) = c.fixture.cabinet_look_pose_deg, c.fixture.handover_center
+    low = kinematics.solve_ik(c.chain, c.look_pose_deg, (hx, hy, c.table_z + 0.03), approach=(0.0, 0.0, -1.0))
+    row = next(r for r in d["cabinet"]["drawers"] if r["id"] == "r2c1")
+    row["taught"]["routes"]["cabinet_look>mat"] = _leg([look, low], c.chain, tcp=False)
+    d["robot_collision"] = dict(cs.SYNTH_CAPSULES, hulls=cs.SYNTH_HULLS)
+    task = drawers.DrawerTask(None, None, calib.from_dict(d), None, pickplace.RunLog(tmp_path / "a"),
+                              drawers.DrawerSettings())
+    flagged = task._guard_calib()
+    assert [f["leg"] for f in flagged] == ["r2c1 route cabinet_look>mat"], flagged
+    assert "handover zone" in flagged[0]["why"]
+    d["handover"] = {"center_m": [-0.10, 0.17], "size_m": [0.09, 0.09]}  # behind-left of the base (v3.3)
+    task = drawers.DrawerTask(None, None, calib.from_dict(d), None, pickplace.RunLog(tmp_path / "b"),
+                              drawers.DrawerSettings())
+    assert task._guard_calib() == []
