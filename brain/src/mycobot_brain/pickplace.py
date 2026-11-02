@@ -459,11 +459,12 @@ class PickPlace:
         return None
 
     def _line(self, goal: Sequence[float], phase: str, approach: Optional[Vec] = DOWN, jaw: Optional[Vec] = None,
-              speed: Optional[int] = None) -> None:
+              speed: Optional[int] = None, approach_end: Optional[Vec] = None) -> None:
         here = self._measured()
         try:
             path = kinematics.line_path(self.calib.chain, here, goal, step_m=self.s.line_step_m,
-                                        max_step=self.s.max_step, approach=approach, jaw=jaw)
+                                        max_step=self.s.max_step, approach=approach, jaw=jaw,
+                                        approach_end=approach_end)
         except IKError as exc:
             raise PickPlaceError(f"{phase}: {exc}") from exc
         self._check_path([here] + path, phase, line=True)

@@ -96,7 +96,7 @@ class World:
         self.opening = {d: 0.0 for d in self.fx.drawers}
         self.objects = {k: dict(v, held=False) for k, v in objects.items()}
         self.start = json.loads(json.dumps(self.objects))
-        self.grip = None  # ("handle", drawer id, TCP grip point with the drawer shut) or ("object", id, offset)
+        self.grip = None  # ("handle", drawer id, the calib's HandleStage) or ("object", id, offset)
         self.angles = list(scene.look_pose_deg)
         self._seen = 0
 
@@ -129,8 +129,8 @@ class World:
         self.angles = list(q)
         p = self.tcp()
         if self.grip and self.grip[0] == "handle":
-            d, held = self.fx.drawers[self.grip[1]], self.grip[2]  # where the TCP held it, drawer shut
-            s = kinematics.dot([p[i] - held[i] for i in range(3)], self.fx.pull_axis)
+            d, stage = self.fx.drawers[self.grip[1]], self.grip[2]  # the drawer follows the TCP along the pull
+            s = stage.from_m + kinematics.dot([p[i] - stage.tcp_from[i] for i in range(3)], self.fx.pull_axis)
             self.opening[d.id] = min(max(s, 0.0), self.fx.open_m)
         elif self.grip and self.grip[0] == "object":
             o = self.objects[self.grip[1]]
@@ -143,7 +143,7 @@ class World:
             for d in self.fx.drawers.values():
                 for stage in self.fx.stages(d):  # any of the calib's grips on it
                     if math.dist(p, self.fx.stage_tcp(stage, self.opening[d.id])) < 0.006:
-                        self.grip = ("handle", d.id, stage.tcp_closed)
+                        self.grip = ("handle", d.id, stage)
                         return
             for oid, o in self.objects.items():
                 shape = self.fx.shapes[o["shape"]]
@@ -398,3 +398,30 @@ def with_two_stage_handles(d, ids=None):
 
 def load_sim_like_two_stage():
     return calib.from_dict(with_two_stage_handles(sim_like_dict()), "cabinet_scene.py (two-stage handles)")
+
+
+def with_side_top_handles(d, tilt_deg=10.0):
+    """The same recipe as sim-scene's calib writer lays it out (write_sim_calib_drawers.py): per drawer
+    handle_grasp {stage_m, side, top}, the top grip leaning ``tilt_deg`` towards the robot at full open
+    (about the jaw axis, y). Made-up numbers on the v2 geometry."""
+    t = math.radians(tilt_deg)
+    open_m = d["cabinet"]["open_m"]
+    for row in d["cabinet"]["drawers"]:
+        knob = row["handle_center_closed_m"]
+        top = [knob[0], knob[1], knob[2] + 0.004]
+        row["handle_grasp"] = {
+            "stage_m": 0.05,
+            "side": {"approach": row["approach"], "jaw_axis": [0.0, 0.0, 1.0], "tcp_closed_m": row["handle_closed_m"],
+                     "tcp_stage_m": [row["handle_closed_m"][0] - 0.05, *row["handle_closed_m"][1:]]},
+            "top": {"jaw_axis": [0.0, 1.0, 0.0], "approach_at_stage": [0.0, 0.0, -1.0],
+                    "approach_at_open": [-math.sin(t), 0.0, -math.cos(t)],
+                    "tcp_stage_m": [top[0] - 0.05, top[1], top[2]], "tcp_open_m": [top[0] - open_m, top[1], top[2]]},
+        }
+    d["cabinet"]["handle_grasp"].update(
+        side={"preshape_value": 55, "close_value": 0, "release_value": 55, "far_closed_m": 0.05, "backoff_m": 0.03},
+        top={"open_value": 100, "close_value": 0, "release_value": 100, "lift_m": 0.03})
+    return d
+
+
+def load_sim_like_side_top():
+    return calib.from_dict(with_side_top_handles(sim_like_dict()), "cabinet_scene.py (sim-scene's side/top layout)")

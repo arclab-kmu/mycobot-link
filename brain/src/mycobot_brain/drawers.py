@@ -59,12 +59,26 @@ def _in_box(p: Sequence[float], lo: Sequence[float], hi: Sequence[float], m: flo
 @dataclass
 class HandlePlan:
     """How one stage of a drawer's pull holds the handle: tool frame and IK seed at the stage's two
-    ends (``from_m``, ``to_m``), and whether the heading may drift during the pull."""
+    ends (``from_m``, ``to_m``), the way onto the handle (None: along the tool axis), and whether the
+    heading may drift during the pull."""
 
     stage: HandleStage
     frames: Dict[float, Tuple[Vec, Optional[Vec]]]
     seeds: Dict[float, List[float]]
     free: bool
+    in_axis: Optional[Vec] = None
+
+    def frame_at(self, opening: float) -> Tuple[Vec, Optional[Vec]]:
+        """Tool z and x at ``opening``, evenly between the two ends (a top grip tilts on the way)."""
+        s0, s1 = self.stage.from_m, self.stage.to_m
+        t = (opening - s0) / (s1 - s0)
+        (a0, j0), (a1, j1) = self.frames[s0], self.frames[s1]
+        mix = [x + (y - x) * t for x, y in zip(a0, a1)]
+        n = kinematics.norm(mix)
+        return (mix[0] / n, mix[1] / n, mix[2] / n), (j0 if t < 0.5 else j1)
+
+    def in_at(self, opening: float) -> Vec:
+        return self.in_axis if self.in_axis is not None else self.frame_at(opening)[0]
 
 
 class NotHeld(PickPlaceError):
@@ -141,7 +155,7 @@ class DrawerTask(PickPlace):
             try:
                 a, _ = self._handle_frame(d)
                 reach[d.id] = round(math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(
-                    a, self.fx.stages(d)[0].approach))))), 1)
+                    a, self.fx.stages(d)[0].approach_from))))), 1)
             except PickPlaceError:
                 reach[d.id] = None
         self.log.event("plan", command=cmd, handle_tilt_deg=reach)
@@ -282,24 +296,22 @@ class DrawerTask(PickPlace):
         return plans
 
     def _stage_plan(self, d: Drawer, k: int, stage: HandleStage) -> HandlePlan:
-        a0, j0 = stage.approach, stage.jaw
-        h = self.fx.stage_tcp(stage, stage.to_m)
+        fx = self.fx
+        a0 = fx.stage_approach(stage, stage.from_m)
+        h = fx.stage_tcp(stage, stage.to_m)
         r = math.hypot(h[0], h[1])
         axis = kinematics.cross(a0, (-h[0] / r, -h[1] / r, 0.0))
-        options: List[Tuple[str, Vec, Optional[Vec], bool]] = [("calib", a0, j0, False)]
-        if j0 is not None:
-            options.append(("free heading", a0, j0, True))
+        options: List[Tuple[str, Optional[kinematics.Mat], bool]] = [("calib", None, False)]
+        if stage.jaw is not None:
+            options.append(("free heading", None, True))
         if kinematics.norm(axis) > 1e-6:
             for tilt in TILTS_DEG[1:]:
-                rot = kinematics.axis_angle(axis, math.radians(tilt))
-                a = tuple(sum(rot[i][m] * a0[m] for m in range(3)) for i in range(3))
-                j = None if j0 is None else tuple(sum(rot[i][m] * j0[m] for m in range(3)) for i in range(3))
-                options.append((f"tipped {tilt} deg", a, j, False))  # type: ignore[arg-type]
+                options.append((f"tipped {tilt} deg", kinematics.axis_angle(axis, math.radians(tilt)), False))
         whys = []
-        which = "" if len(self.fx.stages(d)) == 1 else f" stage {k + 1}"
-        for name, a, j, free in options:
+        which = "" if len(fx.stages(d)) == 1 else f" stage {k + 1}"
+        for name, rot, free in options:
             try:
-                plan = self._try_handle(d, stage, a, j, free)
+                plan = self._try_handle(d, stage, rot, free)
             except (IKError, PickPlaceError) as exc:
                 whys.append(f"{name}: {exc}")
                 continue
@@ -308,7 +320,7 @@ class DrawerTask(PickPlace):
             return plan
         raise PickPlaceError(f"handle of {d.id}{which}: no grasp that holds over the whole pull ({'; '.join(whys)})")
 
-    def _try_handle(self, d: Drawer, stage: HandleStage, a: Vec, j: Optional[Vec], free: bool) -> HandlePlan:
+    def _try_handle(self, d: Drawer, stage: HandleStage, rot: Optional[kinematics.Mat], free: bool) -> HandlePlan:
         """The first IK branch, by seed, that holds the grip over the stage's pull and back-off."""
         # The table look pose first (an ordinary elbow-up arm, whatever the cabinet view needs), then
         # the drawer's own look and the cabinet look: one seed's branch can run into a joint limit
@@ -317,26 +329,36 @@ class DrawerTask(PickPlace):
         err: Exception = PickPlaceError("no seed pose")
         for seed in seeds:
             try:
-                return self._try_handle_from(d, stage, a, j, free, seed)
+                return self._try_handle_from(d, stage, rot, free, seed)
             except (IKError, PickPlaceError) as exc:
                 err = exc
         raise err
 
-    def _try_handle_from(self, d: Drawer, stage: HandleStage, a: Vec, j: Optional[Vec], free: bool,
+    def _try_handle_from(self, d: Drawer, stage: HandleStage, rot: Optional[kinematics.Mat], free: bool,
                          seed: Sequence[float]) -> HandlePlan:
         fx, chain = self.fx, self.calib.chain
-        s0, s1, off = stage.from_m, stage.to_m, stage.standoff_m
-        pre = kinematics.solve_ik(chain, seed, _add(fx.stage_tcp(stage, s0), a, -off), approach=a, jaw=j)
+
+        def turn(v: Vec) -> Vec:
+            return v if rot is None else tuple(sum(rot[i][m] * v[m] for m in range(3)) for i in range(3))  # type: ignore[return-value]
+
+        s0, s1 = stage.from_m, stage.to_m
+        a, a_end = turn(fx.stage_approach(stage, s0)), turn(fx.stage_approach(stage, s1))
+        j = None if stage.jaw is None else turn(stage.jaw)
+        in_axis = None if stage.in_axis is None else turn(stage.in_axis)
+        in0 = in_axis or a
+        pre = kinematics.solve_ik(chain, seed, _add(fx.stage_tcp(stage, s0), in0, -fx.stage_standoff(stage, s0)),
+                                  approach=a, jaw=j)
         to_handle = kinematics.line_path(chain, pre, fx.stage_tcp(stage, s0), step_m=0.02, approach=a, jaw=j)
         pull = kinematics.line_path(chain, to_handle[-1], fx.stage_tcp(stage, s1), step_m=self.s.line_step_m,
-                                    approach=None if free else a, jaw=j)
+                                    approach=None if free else a, jaw=j, approach_end=None if free else a_end)
         t = chain.pose(pull[-1], "tcp")
         a1, j1 = kinematics.column(t, 2), kinematics.column(t, 0) if j is not None else None
-        drift = math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(a, a1)))))
+        drift = math.degrees(math.acos(max(-1.0, min(1.0, kinematics.dot(a_end, a1)))))
         if drift > self.s.yaw_drift_deg:
             raise PickPlaceError(f"the gripper turns {drift:.0f} deg over the pull")
-        back = kinematics.line_path(chain, pull[-1], _add(fx.stage_tcp(stage, s1), a1, -off), step_m=0.02,
-                                    approach=a1, jaw=j1)
+        back = kinematics.line_path(chain, pull[-1],
+                                    _add(fx.stage_tcp(stage, s1), in_axis or a1, -fx.stage_standoff(stage, s1)),
+                                    step_m=0.02, approach=a1, jaw=j1)
         # A tipped or turned gripper leans its back (and the camera) towards the cabinet face. The drawer
         # is at s0 on the way in, moves with the hand on the pull (and the push), and is at s1 on the way out.
         at0, at1 = {**self.opening, d.id: s0}, {**self.opening, d.id: s1}
@@ -360,7 +382,8 @@ class DrawerTask(PickPlace):
                     vias, _, why = self._route(there, other, None, openings=openings)
                     if vias is None:
                         raise PickPlaceError(f"cabinet look <-> {name}: the {why}")
-        return HandlePlan(stage=stage, frames={s0: (a, j), s1: (a1, j1)}, free=free, seeds={s0: pre, s1: back[-1]})
+        return HandlePlan(stage=stage, frames={s0: (a, j), s1: (a1, j1)}, free=free, seeds={s0: pre, s1: back[-1]},
+                          in_axis=in_axis)
 
     def _move_handle(self, d: Drawer, start: float, end: float, verb: str) -> None:
         """Move ``d`` from ``start`` m out to ``end``: per stage of its pull that the move covers (in
@@ -382,7 +405,8 @@ class DrawerTask(PickPlace):
         """Grasp the handle where the drawer is (``start`` m out), move it to ``end``, let go, back off."""
         fx, c, stage = self.fx, self.calib, plan.stage
         near = min(plan.frames, key=lambda o: abs(o - start))
-        a, j = plan.frames[near]
+        a, j = plan.frame_at(start)
+        a_end = plan.frame_at(end)[0]
         release = stage.release if stage.release is not None else c.gripper_open
         preshape = stage.preshape if stage.preshape is not None else release
         self._gripper(preshape, "open")
@@ -391,11 +415,12 @@ class DrawerTask(PickPlace):
         # cabinet front and the arm stalled 6.8 deg short (it hit something our TCP/camera check misses).
         # A later stage of the same pull goes straight on from the back-off (routed).
         here, look = self._measured(), fx.cabinet_look_pose_deg
-        if first and look and max(abs(a - b) for a, b in zip(here, look)) > 1.0:
+        if first and look and max(abs(x - y) for x, y in zip(here, look)) > 1.0:
             # Not low over the table, where an object may stand (the handover mat).
             self._goto(look, f"{tag}: cabinet look", floor=self.calib.table_z + self.s.leave_mat_m)
         try:
-            q = kinematics.solve_ik(c.chain, plan.seeds[near], _add(fx.stage_tcp(stage, start), a, -stage.standoff_m),
+            q = kinematics.solve_ik(c.chain, plan.seeds[near],
+                                    _add(fx.stage_tcp(stage, start), plan.in_at(start), -fx.stage_standoff(stage, start)),
                                     approach=a, jaw=j)
         except IKError as exc:
             raise PickPlaceError(f"{tag}: pre-grasp: {exc}") from exc
@@ -404,13 +429,17 @@ class DrawerTask(PickPlace):
             self._line(fx.stage_tcp(stage, start), f"{tag}: to handle", a, j)
             self._gripper(stage.close if stage.close is not None else c.gripper_closed, "close")
             with self._near(moving=d.id):
-                self._line(fx.stage_tcp(stage, end), tag, None if plan.free else a, j, speed=self.s.handle_speed)
+                self._line(fx.stage_tcp(stage, end), tag, None if plan.free else a, j, speed=self.s.handle_speed,
+                           approach_end=None if plan.free else a_end)
             self.opening[d.id] = end
             self._gripper(release, "open")
-            # Back off along the tool axis as it is now: with a free heading it has turned on the way.
+            # Back off along the tool axis as it is now (with a free heading it has turned on the way), or
+            # straight up off a top grip.
             t = c.chain.pose(self._measured(), "tcp")
             a_now, j_now = kinematics.column(t, 2), (kinematics.column(t, 0) if j is not None else None)
-            self._line(_add(fx.stage_tcp(stage, end), a_now, -stage.standoff_m), f"{tag}: back off", a_now, j_now)
+            out = plan.in_axis if plan.in_axis is not None else a_now
+            self._line(_add(fx.stage_tcp(stage, end), out, -fx.stage_standoff(stage, end)), f"{tag}: back off",
+                       a_now, j_now)
 
     def _open(self, d: Drawer, again: bool = False) -> None:
         # ``again``: the VLM does not see it open, so pull from shut whatever the code thinks.

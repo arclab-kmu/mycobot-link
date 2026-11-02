@@ -235,13 +235,13 @@ def test_handle_stages_from_the_calib_or_one_from_the_old_keys():
     old = cs.load_sim_like().fixture
     (one,) = old.stages(old.drawers["r1c1"])
     assert (one.from_m, one.to_m, one.standoff_m, one.preshape, one.close) == (0.0, 0.1, 0.08, 55, 0)
-    assert one.tcp_closed == old.drawers["r1c1"].handle_closed
+    assert one.tcp_from == old.drawers["r1c1"].handle_closed and one.approach_from == one.approach_to
     new = cs.load_sim_like_two_stage().fixture
     side, top = new.stages(new.drawers["r1c1"])
     assert (side.from_m, side.to_m, top.from_m, top.to_m) == (0.0, 0.05, 0.05, 0.1)
-    assert top.approach == (0.0, 0.0, -1.0) and top.jaw == (0.0, 1.0, 0.0) and top.standoff_m == 0.03
+    assert top.approach_from == (0.0, 0.0, -1.0) and top.jaw == (0.0, 1.0, 0.0) and top.standoff_m == 0.03
     assert top.release == 55 and top.close == 0  # the cabinet's handle_grasp values
-    assert new.stage_tcp(top, 0.05) == pytest.approx((0.236 - 0.05, 0.0, top.tcp_closed[2]))
+    assert new.stage_tcp(top, 0.05) == pytest.approx((0.236 - 0.05, 0.0, top.tcp_from[2]))
 
 
 def test_a_handle_stage_without_its_numbers_stops_the_load():
@@ -249,3 +249,23 @@ def test_a_handle_stage_without_its_numbers_stops_the_load():
     del d["cabinet"]["drawers"][0]["handle_stages"][1]["standoff_m"]
     with pytest.raises(calib.CalibError, match=r"r0c0 handle_stages\[1\]"):
         calib.from_dict(d)
+
+
+def test_sim_scene_s_side_and_top_grips_as_its_calib_writer_lays_them_out():
+    fx = cs.load_sim_like_side_top().fixture
+    side, top = fx.stages(fx.drawers["r2c1"])
+    assert (side.from_m, side.to_m, top.from_m, top.to_m) == (0.0, 0.05, 0.05, 0.1)
+    assert (side.standoff_m, side.backoff_m, side.in_axis) == (0.05, 0.03, None)  # in along the tool
+    assert (top.standoff_m, top.in_axis, top.preshape, top.release) == (0.03, (0.0, 0.0, -1.0), 100, 100)
+    assert fx.stage_standoff(side, 0.0) == 0.05 and fx.stage_standoff(side, 0.05) == 0.03
+    # Halfway through the top stage the tool leans 5 of the 10 deg towards the robot.
+    a = fx.stage_approach(top, 0.075)
+    assert math.degrees(math.atan2(-a[0], -a[2])) == pytest.approx(5.0, abs=0.05)
+
+
+def test_a_drawer_v3_calls_not_openable_is_out_of_use_and_its_null_handle_does_not_stop_the_load():
+    d = cs.sim_like_dict()
+    row = d["cabinet"]["drawers"][1]
+    row.update(openable=False, handle_closed_m=None, approach=None, jaw_axis=None, handle_grasp=None)
+    fx = calib.from_dict(d).fixture
+    assert not fx.drawers[row["id"]].usable and fx.drawers["r0c0"].usable

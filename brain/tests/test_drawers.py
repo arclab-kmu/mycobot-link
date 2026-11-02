@@ -329,16 +329,19 @@ def test_on_sim_scene_numbers_the_close_look_into_a_drawer_is_the_calib_s_straig
     assert world.in_handover("yellow_cone") and world.all_shut()
 
 
+@pytest.mark.parametrize("layout", ["handle_stages", "side/top"])
 def test_a_two_stage_handle_pulls_halfway_from_the_side_then_from_above(link, camera, teleporting, tmp_path,
-                                                                        monkeypatch):
+                                                                        monkeypatch, layout):
     """sim-scene's v3 recipe: a horizontal grip at the end of a full pull puts the wrist in the base, so the
-    pull goes to 50 mm by a side pinch and on to open by a top-down pinch; shutting runs it backwards."""
-    monkeypatch.setattr(cs, "load", cs.load_sim_like_two_stage)
+    pull goes to 50 mm by a side pinch and on to open by a top-down pinch; shutting runs it backwards.
+    In the side/top layout the top grip leans 10 deg towards the robot by full open."""
+    load = cs.load_sim_like_two_stage if layout == "handle_stages" else cs.load_sim_like_side_top
+    monkeypatch.setattr(cs, "load", load)
     cone = dict(SIM_OBJECTS["yellow_cone"], drawer="r1c1", xy=[0.289, 0.0], z=0.063 + 0.013)
     result, world, _ = run(link, camera, teleporting, tmp_path, objects={"yellow_cone": cone}, order=["r1c1"])
     assert result["ok"] is True, result
     assert world.in_handover("yellow_cone") and world.all_shut()
-    scene = cs.load_sim_like_two_stage()
+    scene = load()
     phase, grips = "", []
     for e in events(tmp_path):
         phase = e["phase"] if e["event"] == "move" else phase
@@ -347,8 +350,10 @@ def test_a_two_stage_handle_pulls_halfway_from_the_side_then_from_above(link, ca
             grips.append((phase, round(kinematics.column(t, 2)[2], 2)))
         if e["event"] == "move":
             last_angles = e["angles_deg"]
-    assert grips == [("open r1c1 (1/2): to handle", 0.0), ("open r1c1 (2/2): to handle", -1.0),
-                     ("close r1c1 (2/2): to handle", -1.0), ("close r1c1 (1/2): to handle", 0.0)]
+    lean = -1.0 if layout == "handle_stages" else -math.cos(math.radians(10))  # gripped again at full open to push
+    assert [g[0] for g in grips] == ["open r1c1 (1/2): to handle", "open r1c1 (2/2): to handle",
+                                     "close r1c1 (2/2): to handle", "close r1c1 (1/2): to handle"]
+    assert [g[1] for g in grips] == pytest.approx([0.0, -1.0, lean, 0.0], abs=0.011)
     pulls = [e for e in events(tmp_path) if e["event"] == "move" and e["phase"] == "open r1c1 (2/2)"]
     assert pulls[-1]["tcp_xyz"][0] == pytest.approx(0.236 - 0.1, abs=0.002)  # the knob, fully out
 
