@@ -222,3 +222,24 @@ def test_a_find_with_the_capsules_on_checks_every_move_and_still_hands_the_cone_
     for q in collision.densify([START] + path):
         assert c.robot.self_hit(c.robot.place(c.chain, q), 0.005) is None, q
     assert all(e["event"] != "skip" or "no close look" not in e["why"] for e in events(tmp_path))
+
+
+def test_v3_base_box_stands_in_for_the_base_capsules():
+    """v3 (sim-scene 10:41): the base hull is a box; its capsules overshoot it 10-30 mm, so the box
+    (exact bounds, the base never moves) replaces them in the pairs."""
+    caps = dict(cs.SYNTH_CAPSULES, base_box={"name": "joint1", "frame": "joint1", "center_m": [0, 0, 0.055],
+                                             "size_m": [0.11, 0.15, 0.11]})
+    c = cs.load_sim_like_with_capsules(caps)
+    body = c.robot
+    assert "joint1" not in [cap.name for cap in body.capsules] and "joint1" in body.still
+    # A pad capsule 10 mm off the box's +x face, then 3 mm off it.
+    pad = collision.Capsule("gripper_left3", "joint6_flange", (0, 0, 0), (0, 0, 0), 0.01)
+    for x, expect in ((0.055 + 0.02, None), (0.055 + 0.013, 0.003)):
+        placed = [collision.Placed(pad, (x, 0.0, 0.05), (x, 0.0, 0.07))]
+        gaps = body.pair_gaps(placed, 0.005)
+        if expect is None:
+            assert gaps == []
+        else:
+            assert gaps[0][:2] == ("joint1", "gripper_left3") and gaps[0][2] == pytest.approx(expect, abs=1e-6)
+    with pytest.raises(calib.CalibError, match="not fixed to the base"):
+        cs.load_sim_like_with_capsules(dict(caps, base_box=dict(caps["base_box"], frame="joint3")))

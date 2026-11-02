@@ -17,10 +17,10 @@ moves at most a few mm.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
-from mycobot_brain.kinematics import Chain, Vec, apply, joint_path
+from mycobot_brain.kinematics import Chain, Mat, Vec, apply, inverse, joint_path
 
 CHECK_STEP_DEG = 2.0
 #: links that close on what is grasped (a handle, an object on a floor): the parallel gripper's pads.
@@ -56,6 +56,9 @@ class RobotBody:
     fingers: FrozenSet[str]
     #: links fixed to the base frame (the base itself): they cannot move into the fixture.
     still: FrozenSet[str]
+    #: links given as a box instead of capsules (v3's ``base_box``: the base hull's exact bounds; its
+    #: capsules overshoot it 10-30 mm): name -> (base frame -> box frame, box lo, box hi). Fixed links only.
+    boxes: Dict[str, Tuple[Mat, Vec, Vec]] = field(default_factory=dict)
 
     def place(self, chain: Chain, q_deg: Sequence[float]) -> List[Placed]:
         frames = chain.frames(q_deg)
@@ -63,16 +66,32 @@ class RobotBody:
 
     def self_hit(self, placed: Sequence[Placed], margin: float) -> Optional[str]:
         """The first listed pair closer than ``margin``, as words; None if all clear."""
+        for x, y, gap in self.pair_gaps(placed, margin):
+            return f"{x} {gap * 1000:.0f} mm from {y}"
+        return None
+
+    def pair_gaps(self, placed: Sequence[Placed], margin: float) -> List[Tuple[str, str, float]]:
+        """Every listed pair closer than ``margin``, with its gap (m, negative when they overlap)."""
         by: Dict[str, List[Placed]] = {}
         for p in placed:
             by.setdefault(p.capsule.name, []).append(p)
+        out = []
         for x, y in self.pairs:
-            for p in by.get(x, ()):
-                for r in by.get(y, ()):
-                    gap = segment_distance(p.a, p.b, r.a, r.b) - p.capsule.radius - r.capsule.radius
-                    if gap < margin:
-                        return f"{x} {gap * 1000:.0f} mm from {y}"
-        return None
+            if x in self.boxes and y in self.boxes:
+                continue  # two fixed boxes never move
+            if y in self.boxes:
+                x, y = y, x
+            if x in self.boxes:
+                to_box, lo, hi = self.boxes[x]
+                gaps = [box_distance(apply(to_box, r.a), apply(to_box, r.b), lo, hi, within=r.capsule.radius + margin)
+                        - r.capsule.radius for r in by.get(y, ())]
+            else:
+                gaps = [segment_distance(p.a, p.b, r.a, r.b) - p.capsule.radius - r.capsule.radius
+                        for p in by.get(x, ()) for r in by.get(y, ())]
+            worst = min(gaps, default=math.inf)
+            if worst < margin:
+                out.append((x, y, worst))
+        return out
 
 
 # -- distances -------------------------------------------------------------------
@@ -208,6 +227,8 @@ def from_dict(spec: Dict[str, Any], chain: Chain) -> RobotBody:
     fixed to them that the calib lists (``tool_mount``, ``tcp``, ``camera`` ...). ``capsules`` may
     instead map a link name to one capsule or a list of them. Without ``pairs``, every two links two
     or more joints apart. ``fingers`` names the links that close on a grasp (else by name: pads).
+    ``base_box`` (``{"name", "frame", "center_m", "size_m"}``, a link fixed to the base) replaces that
+    link's capsules with its exact box.
     """
     frames = chain.frame_names()
     raw = spec.get("capsules")
@@ -238,5 +259,19 @@ def from_dict(spec: Dict[str, Any], chain: Chain) -> RobotBody:
     finger_set = frozenset(fingers) if fingers is not None else frozenset(
         n for n in names if any(w in n.lower() for w in FINGER_WORDS))
     still = frozenset(n for n in names if depth[n] == 0)
-    return RobotBody(capsules, pairs, finger_set, still)
+    boxes: Dict[str, Tuple[Mat, Vec, Vec]] = {}
+    for b in [spec["base_box"]] if spec.get("base_box") else []:
+        name, frame = str(b.get("name", "joint1")), str(b.get("frame", "joint1"))
+        if frame not in frames or chain.frame_depth(frame) != 0:
+            raise CollisionSpecError(f"base_box: frame {frame!r} is not fixed to the base")
+        c, size = _xyz(b, "center_m"), _xyz(b, "size_m")
+        if c is None or size is None:
+            raise CollisionSpecError("base_box: needs center_m and size_m")
+        lo = (c[0] - size[0] / 2, c[1] - size[1] / 2, c[2] - size[2] / 2)
+        hi = (c[0] + size[0] / 2, c[1] + size[1] / 2, c[2] + size[2] / 2)
+        boxes[name] = (inverse(chain.frames([0.0] * len(chain.joints))[frame]), lo, hi)  # type: ignore[assignment]
+        # The box stands in for the link's capsules; it never moves, so it is never checked against the fixture.
+        capsules = [cap for cap in capsules if cap.name != name]
+        still = still | {name}
+    return RobotBody(capsules, pairs, finger_set, still, boxes)
 

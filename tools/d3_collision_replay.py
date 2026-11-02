@@ -25,16 +25,10 @@ def worst(c: calib_mod.Calib, q: List[float], margin: float) -> Optional[Tuple[s
     robot = c.robot
     assert robot is not None
     placed = robot.place(c.chain, q)
-    by: Dict[str, List[collision.Placed]] = {}
-    for p in placed:
-        by.setdefault(p.capsule.name, []).append(p)
     best: Optional[Tuple[str, float]] = None
-    for x, y in robot.pairs:
-        for p in by.get(x, ()):
-            for r in by.get(y, ()):
-                gap = collision.segment_distance(p.a, p.b, r.a, r.b) - p.capsule.radius - r.capsule.radius
-                if gap < margin and (best is None or gap < best[1]):
-                    best = (f"{x}-{y}", gap)
+    for x, y, gap in robot.pair_gaps(placed, margin):
+        if best is None or gap < best[1]:
+            best = (f"{x}-{y}", gap)
     scene = [("table", (-9.0, -9.0, -9.0), (9.0, 9.0, c.table_z))]
     if c.fixture is not None:
         scene.append(("cabinet", c.fixture.box_min, c.fixture.box_max))
