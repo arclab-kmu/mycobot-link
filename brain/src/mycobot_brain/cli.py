@@ -109,10 +109,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("--vllm-url", default=planner.DEFAULT_VLLM_URL)
     c.add_argument("--model", default=planner.DEFAULT_MODEL)
 
+    k = sub.add_parser("console", help="web console: command box, both cameras (RGB + depth), cuRobo view; "
+                       "VLM action chunks executed as one QP stream")
+    k.add_argument("--workspace", type=Path, required=True, help="cameras, arms, calibration (JSON)")
+    k.add_argument("--http-port", type=int, default=8095)
+    k.add_argument("--vlm-url", default="http://127.0.0.1:8100/v1", help="OpenAI-compatible VLM (Spark via ssh -L)")
+    k.add_argument("--vlm-model", default="gemma-4-26b-a4b-it")
+    k.add_argument("--rate", type=float, default=20.0, help="QP / streaming rate, Hz")
+    k.add_argument("--speed-param", type=int, default=100,
+                   help="send_angles speed for every streamed tick; the arm server caps it with --max-speed")
+
     args = p.parse_args(argv)
     if args.cmd == "act" and not (0 < args.max_step <= 20 and args.steps >= 1 and 1 <= args.speed <= planner.MAX_SPEED):
         p.error(f"act needs 0 < --max-step <= 20, --steps >= 1 and --speed in 1..{planner.MAX_SPEED}")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(message)s")
+    if args.cmd == "console":
+        from mycobot_brain.console import server, workspace
+
+        ws = workspace.load(args.workspace)
+        con = server.Console(ws, args.vlm_url, args.vlm_model, rate_hz=args.rate, speed_param=args.speed_param)
+        print(f"console on http://127.0.0.1:{args.http_port}  (arms: "
+              + ", ".join(f"{a.name} <- 127.0.0.1:{a.port}" for a in ws.arms.values()) + ")", file=sys.stderr)
+        try:
+            server.serve(con, "127.0.0.1", args.http_port)
+        except KeyboardInterrupt:
+            pass
+        return 0
 
     with contextlib.ExitStack() as stack:
         try:

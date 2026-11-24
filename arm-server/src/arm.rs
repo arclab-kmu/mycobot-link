@@ -89,13 +89,27 @@ pub struct SerialArm {
     port: Box<dyn serialport::SerialPort>,
     reader: FrameReader,
     reply_timeout: Duration,
+    /// Quiet time between a fire-and-forget command and the next query.
+    query_guard: Duration,
+    last_command: Option<Instant>,
     _lock: File,
 }
 
 impl SerialArm {
     /// Take the vendor lock, open the port, and set fresh mode 1 (newest
     /// command wins), as `mycobot-control` does by default.
-    pub fn open(path: &str, baud: u32, reply_timeout: Duration) -> io::Result<Self> {
+    /// `query_guard`: measured 2026-11-24 on the .77 arm. Streaming
+    /// `send_angles` at 15 Hz with `get_angles` at 10 Hz lost 25 of 68 reads
+    /// (reply timeout 100 ms) and the stale reading closed the gate 17 times;
+    /// 10 and 20 Hz streams lost none, because their phase against the reads
+    /// happened to stay clear. A query sent right after a command goes
+    /// unanswered, so wait this long after the last command before querying.
+    pub fn open(
+        path: &str,
+        baud: u32,
+        reply_timeout: Duration,
+        query_guard: Duration,
+    ) -> io::Result<Self> {
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -119,6 +133,8 @@ impl SerialArm {
             port,
             reader: FrameReader::new(),
             reply_timeout,
+            query_guard,
+            last_command: None,
             _lock: lock,
         };
         arm.write(&frame::set_fresh_mode(1))?;
@@ -130,11 +146,25 @@ impl SerialArm {
         self.port.flush()
     }
 
+    /// A command the firmware acts on without replying. Remember when, so the
+    /// next query can keep clear of it.
+    fn command(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write(bytes)?;
+        self.last_command = Some(Instant::now());
+        Ok(())
+    }
+
     /// Send a query and wait for a frame with the same command byte and some
     /// data. That skips an echo of the request itself, as pymycobot's reader
     /// does; replies to earlier fire-and-forget commands go with the input
     /// buffer first.
     fn query(&mut self, request: &[u8]) -> io::Result<Option<frame::Frame>> {
+        if let Some(t) = self.last_command {
+            let quiet = t.elapsed();
+            if quiet < self.query_guard {
+                std::thread::sleep(self.query_guard - quiet);
+            }
+        }
         self.port
             .clear(serialport::ClearBuffer::Input)
             .map_err(io::Error::other)?;
@@ -181,11 +211,11 @@ impl Arm for SerialArm {
     /// Whether the 280 firmware replies at all is TODO(unverified); a re-send
     /// is a second command, so send once.
     fn send_angles(&mut self, angles_deg: &[f64; 6], speed: u8) -> io::Result<()> {
-        self.write(&frame::send_angles(angles_deg, speed))
+        self.command(&frame::send_angles(angles_deg, speed))
     }
 
     fn set_gripper(&mut self, value: u8, speed: u8) -> io::Result<()> {
-        self.write(&frame::set_gripper_value(value, speed))
+        self.command(&frame::set_gripper_value(value, speed))
     }
 
     fn stop(&mut self) -> io::Result<()> {

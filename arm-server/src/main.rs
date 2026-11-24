@@ -45,6 +45,12 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     reply_timeout_ms: u64,
 
+    /// Quiet time after a send_angles/gripper command before the next
+    /// get_angles query; a query sent right after a command goes unanswered
+    /// (see `SerialArm::open`).
+    #[arg(long, default_value_t = 20)]
+    query_guard_ms: u64,
+
     #[arg(long, default_value_t = 500)]
     watchdog_ms: u64,
 
@@ -186,6 +192,7 @@ fn main() -> ExitCode {
             &args.serial,
             args.baud,
             Duration::from_millis(args.reply_timeout_ms),
+            Duration::from_millis(args.query_guard_ms),
         ) {
             Ok(arm) => arm,
             Err(e) => {

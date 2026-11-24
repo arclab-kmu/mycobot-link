@@ -18,9 +18,16 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "jsonschema>=4.18"]
+# `mycobot-brain console` only: camera geometry (numpy, Pillow for the 16-bit
+# depth PNG) and the QP chunk executor from mycobot-control. Clone
+# mycobot-control next to mycobot-link (see [tool.uv.sources]).
+console = ["numpy>=1.24", "pillow>=10", "mycobot-control[qp]"]
 
 [project.scripts]
 mycobot-brain = "mycobot_brain.cli:main"
+
+[tool.uv.sources]
+mycobot-control = { path = "../../mycobot-control", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mycobot_brain"]

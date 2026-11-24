@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myCobot Console</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+  :root {
+    --bg: #FFFFFF; --text: #1F1F1F; --muted: #6E6E6E; --border: #EAEAEA;
+    --accent: #0FBCC4; --accent-deep: #0A7C82; --accent-soft: #D6F5F6; --accent-ink: #097075;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "D2Coding", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font-family: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, sans-serif; font-size: 14px; line-height: 1.5; }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+  header h1 span { color: var(--accent-deep); }
+  .chips { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
+  .chip::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--border); margin-right: 6px; vertical-align: 1px; }
+  .chip.on::before { background: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr); gap: 0; }
+  .left { border-right: 1px solid var(--border); min-width: 0; }
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); border-bottom: 1px solid var(--border); }
+  .cam { background: var(--bg); position: relative; }
+  .cam .cap { display: flex; justify-content: space-between; padding: 7px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  .cam .cap b { color: var(--text); font-weight: 600; }
+  .frame { position: relative; aspect-ratio: 4 / 3; background: #F7F9F9; }
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+  .frame svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .frame .none { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+  aside { display: flex; flex-direction: column; min-width: 0; }
+  section { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  section h2 { margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+  textarea { width: 100%; min-height: 76px; resize: vertical; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 15px; color: var(--text); outline: none; }
+  textarea:focus { border-color: var(--accent); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .row label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; cursor: pointer; }
+  select { font: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; background: var(--bg); color: var(--text); }
+  input[type=checkbox] { accent-color: var(--accent-deep); }
+  input[type=range] { accent-color: var(--accent-deep); width: 110px; }
+  button { font: inherit; font-weight: 600; border-radius: 10px; padding: 8px 16px; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  button.go { background: var(--accent-deep); border-color: var(--accent-deep); color: #fff; }
+  button.go:disabled { opacity: 0.45; cursor: default; }
+  button.stop { border-color: var(--text); background: var(--text); color: #fff; margin-left: auto; }
+  .say { font-size: 15px; margin: 0 0 6px; }
+  .seen { color: var(--muted); margin: 0 0 10px; }
+  ol.steps { margin: 0; padding-left: 20px; font-family: var(--mono); font-size: 12.5px; }
+  ol.steps li { padding: 2px 0; }
+  ol.steps li.now { color: var(--accent-deep); font-weight: 700; }
+  .meter { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 10px; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.25s linear; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .kv b { color: var(--text); font-weight: 500; }
+  .log { font-family: var(--mono); font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0; }
+  .log .err { color: var(--text); font-weight: 600; }
+  .curobo { padding: 0; border-bottom: 0; }
+  .curobo h2 { padding: 12px 20px 10px; margin: 0; }
+  .curobo iframe { display: block; width: 100%; height: 420px; border: 0; border-top: 1px solid var(--border); background: #fff; }
+  .muted { color: var(--muted); }
+  @media (max-width: 980px) {
+    main { grid-template-columns: 1fr; }
+    .left { border-right: 0; }
+  }
+  @media (max-width: 560px) {
+    header, section { padding-left: 16px; padding-right: 16px; }
+    .cams { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>myCobot <span>console</span></h1>
+  <div class="chips" id="chips"></div>
+</header>
+<main>
+  <div class="left">
+    <div class="cams" id="cams"></div>
+    <section class="curobo">
+      <h2>cuRobo · plan and collision check</h2>
+      <iframe id="curoboview" title="cuRobo viewer"></iframe>
+    </section>
+  </div>
+  <aside>
+    <section>
+      <h2>Command</h2>
+      <textarea id="text" placeholder="예: 흰 종이컵 위 5 cm로 가 줘"></textarea>
+      <div class="row">
+        <select id="arm" title="arm"></select>
+        <label title="체크하지 않으면 계획만 하고 팔은 움직이지 않음"><input type="checkbox" id="execute"> 실행</label>
+        <label title="VLM이 done이라고 할 때까지 반복"><input type="checkbox" id="loop"> 반복</label>
+        <label title="큰 이동은 cuRobo로 충돌 없는 경로 계획"><input type="checkbox" id="curobo" checked> cuRobo</label>
+      </div>
+      <div class="row">
+        <label title="관절 최대 속도 (deg/s). 2026-11-24 실측: 약 80 deg/s부터 팔이 0.2 s 늦게 따라와 20° 검사에 걸림">속도 <input type="range" id="speed" min="20" max="90" step="10" value="60"><b id="speedv">60</b></label>
+        <button class="go" id="go">보내기</button>
+        <button class="stop" id="stop">정지</button>
+      </div>
+    </section>
+    <section>
+      <h2>Plan</h2>
+      <p class="say" id="say"><span class="muted">아직 명령이 없어요.</span></p>
+      <p class="seen" id="seen"></p>
+      <ol class="steps" id="steps"></ol>
+      <div class="meter"><i id="prog"></i></div>
+    </section>
+    <section>
+      <h2>Arm</h2>
+      <div class="kv" id="armkv"></div>
+    </section>
+    <section>
+      <h2>Log</h2>
+      <pre class="log" id="log"></pre>
+    </section>
+  </aside>
+</main>
+<script>
+const CFG = __CONFIG__;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+// camera grid: for every camera, RGB then depth
+for (const cam of CFG.cameras) {
+  for (const kind of ["color", "depth"]) {
+    const id = `${cam.name}-${kind}`;
+    const el = document.createElement("div");
+    el.className = "cam";
+    el.innerHTML = `<div class="cap"><b>${esc(cam.label)}</b><span>${kind === "color" ? "RGB" : "Depth"} · <span id="${id}-fps">–</span></span></div>
+      <div class="frame"><img id="${id}" alt="${esc(cam.label)} ${kind}" src="/cam/${cam.name}/${kind}.mjpg">
+      ${kind === "color" ? `<svg id="${id}-ov" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>` : ""}</div>`;
+    $("cams").appendChild(el);
+  }
+}
+for (const a of CFG.arms) $("arm").insertAdjacentHTML("beforeend", `<option value="${a.name}">${esc(a.label)}</option>`);
+$("curoboview").src = CFG.curobo_view;
+$("speed").oninput = () => { $("speedv").textContent = $("speed").value; };
+
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  return r.json();
+}
+$("go").onclick = async () => {
+  const text = $("text").value.trim();
+  if (!text) return;
+  const r = await post("/api/command", {text, arm: $("arm").value, execute: $("execute").checked,
+    loop: $("loop").checked, curobo: $("curobo").checked, speed_dps: +$("speed").value});
+  if (!r.ok) alert(r.error);
+};
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("go").click(); });
+$("stop").onclick = () => post("/api/stop");
+
+function drawTargets(task) {
+  for (const cam of CFG.cameras) {
+    const svg = $(`${cam.name}-color-ov`);
+    if (!svg) continue;
+    const marks = (task && task.marks && task.marks[cam.name]) || [];
+    svg.innerHTML = marks.map((m, i) => `
+      <circle cx="${m.x}" cy="${m.y}" r="18" fill="none" stroke="#0FBCC4" stroke-width="5"/>
+      <circle cx="${m.x}" cy="${m.y}" r="4" fill="#0FBCC4"/>
+      <text x="${m.x + 24}" y="${m.y - 18}" font-size="34" font-family="Pretendard Variable, sans-serif" fill="#FFFFFF" stroke="#0A7C82" stroke-width="7" paint-order="stroke">${i + 1} ${esc(m.label || "")}</text>`).join("");
+  }
+}
+
+function render(s) {
+  const chips = [];
+  for (const [name, a] of Object.entries(s.arms)) chips.push(`<span class="chip ${a.connected ? "on" : ""}">arm ${esc(name)} ${a.connected ? (a.live ? "live" : "dry-run") : "off"}</span>`);
+  chips.push(`<span class="chip ${s.vlm.ok ? "on" : ""}">VLM ${esc(s.vlm.model)}${s.vlm.last_s ? " · " + s.vlm.last_s.toFixed(1) + " s" : ""}</span>`);
+  chips.push(`<span class="chip ${s.curobo.ok ? "on" : ""}">cuRobo${s.curobo.ok ? "" : " off"}</span>`);
+  $("chips").innerHTML = chips.join("");
+  for (const [id, f] of Object.entries(s.feeds)) { const el = $(`${id}-fps`); if (el) el.textContent = f.ok ? `${f.fps.toFixed(0)} fps` : "no signal"; }
+  const t = s.task;
+  $("go").disabled = !!(t && t.running);
+  if (t) {
+    $("say").textContent = t.say || t.status;
+    $("seen").textContent = t.seen || "";
+    $("steps").innerHTML = (t.steps || []).map((st, i) => `<li class="${i === t.step ? "now" : ""}">${esc(st)}</li>`).join("");
+    $("prog").style.width = `${Math.round(100 * (t.progress || 0))}%`;
+    drawTargets(t);
+  }
+  const a = s.arms[$("arm").value];
+  if (a) {
+    const q = a.q ? a.q.map((v) => v.toFixed(1)).join(" ") : "–";
+    const p = a.tcp ? a.tcp.map((v) => v.toFixed(0)).join(" ") : "–";
+    $("armkv").innerHTML = `<span>joints</span><b>${q}</b><span>tool (world)</span><b>${p}</b><span>gate</span><b>${esc(a.gate || "–")}</b><span>speed</span><b>${a.speed_dps ? a.speed_dps.toFixed(0) + " deg/s" : "–"}</b>`;
+  }
+  $("log").innerHTML = s.log.map((l) => l.startsWith("!") ? `<span class="err">${esc(l)}</span>` : esc(l)).join("\n");
+}
+async function poll() {
+  try { render(await (await fetch("/api/state")).json()); } catch (e) { /* console restarting */ }
+  setTimeout(poll, 300);
+}
+poll();
+</script>
+</body>
+</html>
