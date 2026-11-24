@@ -81,8 +81,11 @@ def approach_frames(p_base: np.ndarray) -> list[np.ndarray]:
 
 class Console:
     def __init__(self, ws: Workspace, vlm_url: str, vlm_model: str, rate_hz: float = 20.0, speed_param: int = 100,
-                 bind: str = "127.0.0.1") -> None:
+                 bind: str = "127.0.0.1", scenarios: list[dict[str, Any]] | None = None,
+                 tick_log: str | None = None) -> None:
         self.ws = ws
+        self.scenarios = {sc["trigger"].strip(): sc for sc in (scenarios or [])}
+        self.tick_log = tick_log
         self.vlm_url, self.vlm_model = vlm_url, vlm_model
         self.feeds: dict[str, Feed] = {}
         for cam in ws.cameras.values():
@@ -115,6 +118,7 @@ class Console:
         except ImportError as exc:
             self.say(f"! motion disabled (mycobot_control.qp missing: {exc})")
         threading.Thread(target=self._health_loop, name="health", daemon=True).start()
+        threading.Thread(target=self._view_loop, name="curobo-view", daemon=True).start()
 
     # -- bookkeeping -------------------------------------------------------
 
@@ -136,15 +140,27 @@ class Console:
                     self.vlm_ok = self.vlm_model in ids
             except Exception:  # noqa: BLE001
                 self.vlm_ok = False
-            # live arm pose to the cuRobo view (cheap; the view is optional)
-            if self.curobo_ok and self.task is not None:
-                name = self.task.get("arm")
-                st = self.links[name].latest_state() if name in self.links else None
-                if st and st.get("angles_deg"):
-                    from mycobot_brain.console.motion import curobo_post
-
-                    curobo_post(self.ws.curobo_api, "/state", {"q": st["angles_deg"]})
             time.sleep(1.0)
+
+    def _view_loop(self) -> None:
+        """Live pose of the task's arm to the cuRobo view, 10 Hz while a task runs (the view is optional)."""
+        from mycobot_brain.console.motion import curobo_post
+
+        last = None
+        while True:
+            time.sleep(0.1)
+            t = self.task
+            if not (self.curobo_ok and t is not None and t.get("running")):
+                continue
+            name = t.get("arm")
+            st = self.links[name].latest_state() if name in self.links else None
+            q = st.get("angles_deg") if st else None
+            if q and q != last:
+                try:
+                    curobo_post(self.ws.curobo_api, "/state", {"q": q}, timeout=0.3)
+                    last = q
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _feed_state(self) -> dict[str, Any]:
         out = {}
@@ -200,6 +216,18 @@ class Console:
             return {"ok": False, "error": f"unknown arm {arm!r}"}
         if self._task_thread is not None and self._task_thread.is_alive():
             return {"ok": False, "error": "a command is still running; press 정지 first"}
+        sc = self.scenarios.get(text)
+        if sc is not None:
+            from mycobot_brain.console import scenario as sc_mod
+
+            execute = bool(body.get("execute"))
+            self.task = {"text": text, "arm": sc["phases"][0]["arm"], "running": True, "phase": "plan",
+                         "status": "미리 계획한 시나리오 (VLM 안 씀)", "say": sc.get("say", ""), "seen": sc.get("seen", ""),
+                         "steps": sc_mod.labels(sc), "step": -1, "progress": 0.0, "marks": {}, "execute": execute,
+                         "scenario": sc.get("title", text)}
+            self._task_thread = threading.Thread(target=self._run_scenario, args=(sc, execute), name="scenario", daemon=True)
+            self._task_thread.start()
+            return {"ok": True}
         opts = {
             "execute": bool(body.get("execute")),
             "loop": bool(body.get("loop")),
@@ -409,6 +437,90 @@ class Console:
             else:
                 out.append(seg)
         return out
+
+    def _grab_jpeg(self, cam: str) -> bytes | None:
+        feed = self.feeds.get(f"{cam}-color")
+        if feed is None:
+            return None
+        jpeg, _ = feed.wait_newer(time.time() + 0.01, timeout=1.0)
+        return jpeg
+
+    def _phase_obstacles(self, ph: dict[str, Any]) -> list[dict]:
+        """Workspace boxes (unless the phase opts out: the .70 base height in the workspace is too rough for its
+        links) plus the phase's own boxes, in the phase arm's base frame."""
+        own = list(ph.get("obstacles", []))
+        if not ph.get("workspace_obstacles", True):
+            return own[:15]
+        return (self.ws.obstacles_for(self.ws.arms[ph["arm"]]) + own)[:15]
+
+    def _run_scenario(self, sc: dict[str, Any], execute: bool) -> None:
+        """Every phase checked by cuRobo first; then each phase runs as one continuous stream."""
+        from mycobot_brain.console import scenario as sc_mod
+        from mycobot_brain.console.motion import curobo_check, curobo_post
+
+        t = self.task
+        logf = open(self.tick_log, "a") if self.tick_log else None
+        try:
+            self.say(f"시나리오 '{sc.get('title', sc['trigger'])}': 미리 측정·계획·검사한 관절 경로 (VLM 안 씀)")
+            built = []
+            for ph in sc["phases"]:
+                arm = ph["arm"]
+                if arm not in self.links:
+                    raise RuntimeError(f"scenario arm {arm!r} is not in the workspace")
+                segs = sc_mod.build(sc, ph, self._grab_jpeg, self.say)
+                full = np.vstack([s.q for s in segs if s.kind == "joints"])
+                secs = sum(len(s.q) * s.q_dt for s in segs if s.kind == "joints")
+                if self.curobo_ok:
+                    chk = curobo_check(self.ws.curobo_api, full, self._phase_obstacles(ph))
+                    if not chk.get("ok"):
+                        raise RuntimeError(f"{arm}: 충돌 예상 ({chk.get('index')}/{chk.get('n')}): {chk.get('detail')}")
+                    self.say(f"{arm} {ph.get('label', '')}: cuRobo check clear ({chk.get('checked')} samples), "
+                             f"{secs:.0f} s of path")
+                elif execute:
+                    raise RuntimeError("cuRobo 서버가 꺼져 있어 링크 충돌을 검사할 수 없어요; 실행하지 않아요")
+                built.append((ph, segs, full))
+            if not execute:
+                t.update(status="계획만 (실행 꺼짐)")
+                return
+            step0 = 0
+            for ph, segs, full in built:
+                arm = ph["arm"]
+                link = self.links[arm]
+                st = link.latest_state()
+                if not (link.connected and st and st.get("angles_deg")):
+                    raise RuntimeError(f"arm {arm} is not connected")
+                q0 = np.array(st["angles_deg"], float)
+                if float(np.max(np.abs(q0 - full[0]))) > 5.0:
+                    raise RuntimeError(f"arm {arm} is {np.max(np.abs(q0 - full[0])):.1f} deg from the phase start")
+                t.update(arm=arm, phase="move", status=f"{arm} · {ph.get('label', '')}")
+                if self.curobo_ok:
+                    try:
+                        curobo_post(self.ws.curobo_api, "/world", {"obstacles": self._phase_obstacles(ph)}, timeout=2.0)
+                        curobo_post(self.ws.curobo_api, "/show_plan", {"q": np.round(full[::2], 2).tolist(), "dt": 0.2})
+                    except Exception as exc:  # noqa: BLE001 - the view is optional
+                        self.say(f"! cuRobo view: {exc}")
+                self.runner.bias[arm] = np.zeros(6)  # the scenario's paths already carry the feed-forward
+
+                def on_tick(q_cmd, arm=arm, link=link):
+                    if logf is not None:
+                        s_ = link.latest_state() or {}
+                        logf.write(json.dumps({"t": round(time.time(), 3), "arm": arm, "cmd": np.round(q_cmd, 2).tolist(),
+                                               "q": s_.get("angles_deg"), "seq": s_.get("seq")}) + "\n")
+
+                stats = self.runner.run(link, self.kins[arm], segs, float(ph.get("speed_dps", 60)),
+                                        on_step=lambda i, s0=step0: t.update(step=s0 + i), on_tick=on_tick, arm=arm)
+                self.say(f"{arm} done {stats['t']:.1f} s, refused {stats['fails']}, max track err "
+                         f"{stats['max_err_deg']:.1f} deg, end err {stats.get('final_err_deg', 0):.1f} deg")
+                step0 += len(segs)
+            t.update(status="완료", progress=1.0)
+        except Exception as exc:  # noqa: BLE001 - surface anything on the page
+            self.say(f"! {type(exc).__name__}: {exc}")
+            log.debug(traceback.format_exc())
+            t.update(status=f"멈춤: {exc}")
+        finally:
+            if logf is not None:
+                logf.close()
+            t.update(running=False, phase="idle", step=-1)
 
     def _run_task(self, text: str, arm_name: str, opts: dict[str, Any]) -> None:
         t = self.task

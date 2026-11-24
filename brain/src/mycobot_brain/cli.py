@@ -116,6 +116,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     k.add_argument("--vlm-url", default="http://127.0.0.1:8100/v1", help="OpenAI-compatible VLM (Spark via ssh -L)")
     k.add_argument("--vlm-model", default="gemma-4-26b-a4b-it")
     k.add_argument("--rate", type=float, default=20.0, help="QP / streaming rate, Hz")
+    k.add_argument("--scenario", type=Path, action="append", default=[],
+                   help="pre-planned scenario JSON; typing its trigger text runs it instead of the VLM (repeatable)")
+    k.add_argument("--tick-log", help="append every streamed tick (command + newest reading) to this JSONL")
     k.add_argument("--speed-param", type=int, default=100,
                    help="send_angles speed for every streamed tick; the arm server caps it with --max-speed")
 
@@ -127,7 +130,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         from mycobot_brain.console import server, workspace
 
         ws = workspace.load(args.workspace)
-        con = server.Console(ws, args.vlm_url, args.vlm_model, rate_hz=args.rate, speed_param=args.speed_param)
+        from mycobot_brain.console import scenario as sc_mod
+
+        scs = [sc_mod.load(p_) for p_ in args.scenario]
+        con = server.Console(ws, args.vlm_url, args.vlm_model, rate_hz=args.rate, speed_param=args.speed_param,
+                             scenarios=scs, tick_log=args.tick_log)
         print(f"console on http://127.0.0.1:{args.http_port}  (arms: "
               + ", ".join(f"{a.name} <- 127.0.0.1:{a.port}" for a in ws.arms.values()) + ")", file=sys.stderr)
         try:

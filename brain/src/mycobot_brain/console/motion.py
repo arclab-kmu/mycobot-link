@@ -33,7 +33,7 @@ class MotionStopped(RuntimeError):
 
 @dataclass
 class Segment:
-    kind: str  # "cart" | "joints" | "grip" | "wait"
+    kind: str  # "cart" | "joints" | "grip" | "wait" | "call"
     label: str = ""
     points_base: list[np.ndarray] = field(default_factory=list)  # tool-point waypoints, arm base frame
     q: np.ndarray | None = None  # "joints": N x 6 deg path (or 1 x 6 goal)
@@ -41,6 +41,8 @@ class Segment:
     R_end: np.ndarray | None = None  # "cart": tool orientation at the end (base frame); None keeps the current one
     value: int = 0
     seconds: float = 0.0
+    fn: Callable[[], Any] | None = None  # "call": runs while the arm holds; may edit later segments' q
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 def _rot_z_to(R: np.ndarray) -> np.ndarray:
@@ -230,6 +232,8 @@ class MotionRunner:
                     self._hold(link, ex, 0.8, stats, on_tick)
                 elif seg.kind == "wait":
                     self._hold(link, ex, seg.seconds, stats, on_tick)
+                elif seg.kind == "call":
+                    self._hold_while(link, ex, seg.fn, stats)
                 elif seg.kind == "cart":
                     T0 = kin.fk(ex.q_cmd)
                     poses = self.cart_poses(T0[:3, 3], seg.points_base, T0[:3, :3], 2.5 * speed_dps, self.dt,
@@ -317,6 +321,29 @@ class MotionRunner:
                 time.sleep(delay)
             else:
                 t_next = time.monotonic()
+
+    def _hold_while(self, link: ArmLink, ex, fn: Callable[[], Any] | None, stats: dict) -> None:
+        """Hold the current command (the arm server's watchdog needs traffic) while ``fn`` runs."""
+        if fn is None:
+            return
+        box: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                box["out"] = fn()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the motion thread
+                box["exc"] = exc
+
+        th = threading.Thread(target=work, name="segment-call", daemon=True)
+        th.start()
+        while th.is_alive():
+            if self.stop_evt.is_set():
+                raise MotionStopped("stopped")
+            self._send(link, ex.q_cmd, stats)
+            th.join(self.dt)
+        if "exc" in box:
+            exc = box["exc"]
+            raise exc if isinstance(exc, MotionStopped) else MotionStopped(f"{type(exc).__name__}: {exc}")
 
     def _hold(self, link: ArmLink, ex, seconds: float, stats: dict, on_tick) -> None:
         end = time.monotonic() + seconds
