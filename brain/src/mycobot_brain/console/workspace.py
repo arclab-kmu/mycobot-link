@@ -147,8 +147,14 @@ class Workspace:
         for o in list(self.obstacles) + list(extra or []):
             if o.get("skip_for") == arm.name:
                 continue
-            c = arm.to_base(np.array(o["center_mm"], float))
-            yaw = math.radians(o.get("yaw_deg", 0.0)) - math.atan2(arm.R[1, 0], arm.R[0, 0])
+            c = np.array(o["center_mm"], float)
+            yaw_w = math.radians(o.get("yaw_deg", 0.0))
+            src = self.arms.get(o.get("frame", ""))
+            if src is not None:  # defined in another arm's base frame -> world first
+                c = src.to_world(c)
+                yaw_w += math.atan2(src.R[1, 0], src.R[0, 0])
+            c = arm.to_base(c)
+            yaw = yaw_w - math.atan2(arm.R[1, 0], arm.R[0, 0])
             out.append({"name": o["name"], "dims_mm": list(map(float, o["dims_mm"])),
                         "pose": [*map(float, c), math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]})
         return out
@@ -198,6 +204,8 @@ def load(path: str | Path) -> Workspace:
     for name, a in cfg["arms"].items():
         yaw = math.radians(a.get("yaw_deg", 0.0))
         R = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1.0]])
+        if a.get("R_base") is not None:  # full base rotation (arm base -> world), e.g. from a plate calibration
+            R = np.array(a["R_base"], float)
         arms[name] = Arm(
             name=name,
             port=int(a["port"]),

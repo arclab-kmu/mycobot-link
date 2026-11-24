@@ -81,7 +81,7 @@ source = { editable = "." }
 
 [package.optional-dependencies]
 console = [
-    { name = "mycobot-control" },
+    { name = "mycobot-control", extra = ["qp"] },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -108,13 +108,22 @@ name = "mycobot-control"
 version = "0.1.0"
 source = { editable = "../../mycobot-control" }
 
+[package.optional-dependencies]
+qp = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
 [package.metadata]
 requires-dist = [
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.17" },
+    { name = "numpy", marker = "extra == 'qp'", specifier = ">=1.17" },
     { name = "opencv-python-headless", marker = "extra == 'camera'", specifier = ">=4.5" },
     { name = "pymycobot", marker = "extra == 'arm'", specifier = ">=4.0.5,<5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7" },
 ]
-provides-extras = ["arm", "ros", "camera", "dev"]
+provides-extras = ["arm", "ros", "camera", "qp", "dev"]
 
 [[package]]
 name = "numpy"
