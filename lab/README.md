@@ -12,5 +12,12 @@ Lab-specific files the console and the planner read, kept here so the set-up can
 - `jetson-viewer/`: the RealSense web viewer that runs on both Jetsons as `~/rs_web_viewer/`
   (`start.sh` / `stop.sh`, 127.0.0.1:8090, reached through SSH tunnels; see `tools/console_up.sh`).
 
+- `teach/`: the hand-guided demonstration from 2026-11-22 on the `.77` arm (torque released, joints logged at
+  ~15 Hz until `/tmp/teach_stop`): `teach_bg.py`, `teach_demo1.csv` (1152 rows, firmware degrees), its log.
+  Copied from the Jetson's `~/mycobot-link/` where it was untracked.
+
+The Jetsons' `~/mycobot-link` checkouts sit at `792ccde`; their `mycobot-arm` binaries were rebuilt on 2026-11-24
+from the `25a8d50` source (`--query-guard-ms`). Rebuild there after pulling if the arm server changes again.
+
 Not in any repository yet: the cuRobo plan server (`~/manipulation/mycobot_curobo`, `scripts/plan_server.py`,
 robot configs and meshes), which `tools/console_up.sh` starts from `$CUROBO`.
