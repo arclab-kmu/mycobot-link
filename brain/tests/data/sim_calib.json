@@ -1,0 +1,734 @@
+{
+  "version": 1,
+  "source": "arc-mycobot scripts/vlm_sim (Isaac Lab 3.0.0, Newton MuJoCo Warp); URDF mycobot_280_jn_camera_gripper_parallel.urdf",
+  "units": "metres, radians in URDF fields, firmware degrees for angles_deg",
+  "base_frame": "URDF link 'joint1': origin at the base bottom on the table top, z up, x forward (arm zero pose leans along -y/+x as in the URDF); the simulator world equals this frame",
+  "angle_convention": "urdf_rad = radians(sign * (firmware_deg - offset_deg)); revolute joint rotates its child about 'axis' after the fixed origin transform T(origin_xyz) * Rz(y) Ry(p) Rx(r) (URDF rpy)",
+  "arm_joints": [
+    {
+      "name": "joint2_to_joint1",
+      "type": "revolute",
+      "parent": "joint1",
+      "child": "joint2",
+      "origin_xyz_m": [
+        0.0,
+        0.0,
+        0.15756
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "firmware_index": 1,
+      "offset_deg": 0.0,
+      "sign": 1.0,
+      "limit_deg": [
+        -168.0,
+        168.0
+      ],
+      "safe_limit_deg": [
+        -165.0,
+        165.0
+      ]
+    },
+    {
+      "name": "joint3_to_joint2",
+      "type": "revolute",
+      "parent": "joint2",
+      "child": "joint3",
+      "origin_xyz_m": [
+        0.0,
+        0.0,
+        -0.001
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        1.5708,
+        -1.5708
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "firmware_index": 2,
+      "offset_deg": 0.0,
+      "sign": 1.0,
+      "limit_deg": [
+        -140.0,
+        140.0
+      ],
+      "safe_limit_deg": [
+        -137.0,
+        137.0
+      ]
+    },
+    {
+      "name": "joint4_to_joint3",
+      "type": "revolute",
+      "parent": "joint3",
+      "child": "joint4",
+      "origin_xyz_m": [
+        -0.1104,
+        0.0,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "firmware_index": 3,
+      "offset_deg": 0.0,
+      "sign": 1.0,
+      "limit_deg": [
+        -150.0,
+        150.0
+      ],
+      "safe_limit_deg": [
+        -147.0,
+        147.0
+      ]
+    },
+    {
+      "name": "joint5_to_joint4",
+      "type": "revolute",
+      "parent": "joint4",
+      "child": "joint5",
+      "origin_xyz_m": [
+        -0.096,
+        0.0,
+        0.06462
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        -1.5708
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "firmware_index": 4,
+      "offset_deg": 0.0,
+      "sign": 1.0,
+      "limit_deg": [
+        -150.0,
+        150.0
+      ],
+      "safe_limit_deg": [
+        -147.0,
+        147.0
+      ]
+    },
+    {
+      "name": "joint6_to_joint5",
+      "type": "revolute",
+      "parent": "joint5",
+      "child": "joint6",
+      "origin_xyz_m": [
+        0.0,
+        -0.07318,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        1.5708,
+        -1.5708,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "firmware_index": 5,
+      "offset_deg": 0.0,
+      "sign": 1.0,
+      "limit_deg": [
+        -155.0,
+        160.0
+      ],
+      "safe_limit_deg": [
+        -152.0,
+        157.0
+      ]
+    },
+    {
+      "name": "joint6output_to_joint6",
+      "type": "revolute",
+      "parent": "joint6",
+      "child": "joint6_flange",
+      "origin_xyz_m": [
+        0.0,
+        0.0456,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        -1.5708,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "firmware_index": 6,
+      "offset_deg": 0.0,
+      "sign": 1.0,
+      "limit_deg": [
+        -180.0,
+        180.0
+      ],
+      "safe_limit_deg": [
+        -177.0,
+        177.0
+      ]
+    }
+  ],
+  "flange_link": "joint6_flange",
+  "flange_to_camera_joints": [
+    {
+      "name": "joint6_flange_to_tool_mount",
+      "type": "fixed",
+      "parent": "joint6_flange",
+      "child": "tool_mount",
+      "origin_xyz_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.785398
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "joint6_flange_to_camera_mount",
+      "type": "fixed",
+      "parent": "tool_mount",
+      "child": "camera_mount",
+      "origin_xyz_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        1.5708
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "camera_mount_to_camera_link",
+      "type": "fixed",
+      "parent": "camera_mount",
+      "child": "camera_link",
+      "origin_xyz_m": [
+        0.0415,
+        0.0,
+        0.0181
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "flange_to_tcp_joints": [
+    {
+      "name": "joint6_flange_to_tool_mount",
+      "type": "fixed",
+      "parent": "joint6_flange",
+      "child": "tool_mount",
+      "origin_xyz_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.785398
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "joint6_flange_to_tcp",
+      "type": "fixed",
+      "parent": "tool_mount",
+      "child": "tcp",
+      "origin_xyz_m": [
+        0.0,
+        0.0,
+        0.096
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "flange_T_camera_optical": {
+    "xyz_m": [
+      -0.029345,
+      0.029345,
+      0.0181
+    ],
+    "quat_xyzw": [
+      0.0,
+      0.0,
+      0.92388,
+      0.382682
+    ],
+    "matrix": [
+      [
+        -0.707109,
+        -0.707104,
+        0.0,
+        -0.029345
+      ],
+      [
+        0.707104,
+        -0.707109,
+        0.0,
+        0.029345
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0181
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "flange_T_tcp": {
+    "xyz_m": [
+      0.0,
+      0.0,
+      0.096
+    ],
+    "quat_xyzw": [
+      0.0,
+      0.0,
+      0.382683,
+      0.92388
+    ],
+    "matrix": [
+      [
+        0.707107,
+        -0.707107,
+        0.0,
+        0.0
+      ],
+      [
+        0.707107,
+        0.707107,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.096
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "camera": {
+    "optical_frame": "URDF link 'camera_link', OpenCV convention: x right, y down, z forward (out of the lens)",
+    "width": 640,
+    "height": 480,
+    "fx": 548.3,
+    "fy": 548.3,
+    "cx": 320.0,
+    "cy": 240.0,
+    "K": [
+      [
+        548.3,
+        0.0,
+        320.0
+      ],
+      [
+        0.0,
+        548.3,
+        240.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "distortion": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "pixel_convention": "u = fx*X/Z + cx, v = fy*Y/Z + cy with (0, 0) at the top-left corner of the image; pixel column i covers u in [i, i+1), so its centre is u = i + 0.5",
+    "note": "fx/fy are the real 640x480 camera's calibrated values (60.6 deg HFOV); the gripper linkage covers roughly the left 150 px at the look pose"
+  },
+  "tcp": {
+    "link": "tcp",
+    "meaning": "grasp point between the finger pads; tool z (approach) points out of the flange, tool x is the jaw closing axis",
+    "pad_extent_along_tool_z_m": [
+      -0.0146,
+      0.0114
+    ],
+    "jaw_gap_m": {
+      "open": 0.0456,
+      "closed": 0.0194
+    }
+  },
+  "table_z_m": 0.0,
+  "block": {
+    "edge_m": 0.025,
+    "mass_kg": 0.02,
+    "color": "red"
+  },
+  "box": {
+    "outer_m": [
+      0.1,
+      0.1,
+      0.045
+    ],
+    "inner_m": [
+      0.088,
+      0.088,
+      0.041
+    ],
+    "wall_m": 0.006,
+    "floor_m": 0.004,
+    "rim_height_m": 0.045,
+    "rim_z_m": 0.045,
+    "floor_top_z_m": 0.004,
+    "color": "brown",
+    "axis_aligned": true,
+    "note": "truth brown_box.pos_m is the outer bottom centre (on the table); rim_center_m adds rim_height_m"
+  },
+  "look_pose_deg": [
+    25.8,
+    -14.8,
+    -4.8,
+    -70.4,
+    0.0,
+    160.8
+  ],
+  "look_pose_camera": {
+    "xyz_m": [
+      0.189893,
+      -4e-05,
+      0.290034
+    ],
+    "quat_xyzw": [
+      1.0,
+      -4e-06,
+      -3e-06,
+      -3e-06
+    ],
+    "matrix": [
+      [
+        1.0,
+        -7e-06,
+        -7e-06,
+        0.189893
+      ],
+      [
+        -7e-06,
+        -1.0,
+        5e-06,
+        -4e-05
+      ],
+      [
+        -7e-06,
+        -5e-06,
+        -1.0,
+        0.290034
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "workspace_m": {
+    "block_center": {
+      "x": [
+        0.14,
+        0.24
+      ],
+      "y": [
+        -0.09,
+        0.09
+      ],
+      "r": [
+        0.14,
+        0.235
+      ]
+    },
+    "box_center": {
+      "x": [
+        0.17,
+        0.22
+      ],
+      "y": [
+        -0.05,
+        0.05
+      ],
+      "r": [
+        0.17,
+        0.225
+      ]
+    },
+    "note": "sampling zones of the simulator's reset; the arm reaches a top-down grasp at r 0.12-0.24 m"
+  },
+  "gripper": {
+    "open_value": 100,
+    "closed_value": 0,
+    "mapping": "set_gripper_value: 100 = open 45.6 mm, 0 = closed 19.4 mm, linear in finger travel; the 25 mm block stops the jaw near value 21",
+    "full_travel_s": "50 / speed (1.0 s at speed 50)"
+  },
+  "speed_map": "move_joints: the slowest-arriving joint moves at speed deg/s (mycobot-link schema/SIM.md), all joints interpolated linearly to arrive together",
+  "fk_check": [
+    {
+      "angles_deg": [
+        25.8,
+        -14.8,
+        -4.8,
+        -70.4,
+        0.0,
+        160.8
+      ],
+      "tcp_xyz_m": [
+        0.148393,
+        -3.9e-05,
+        0.212134
+      ],
+      "camera_xyz_m": [
+        0.189893,
+        -4e-05,
+        0.290034
+      ],
+      "camera_R": [
+        [
+          1.0,
+          -7e-06,
+          -7e-06
+        ],
+        [
+          -7e-06,
+          -1.0,
+          5e-06
+        ],
+        [
+          -7e-06,
+          -5e-06,
+          -1.0
+        ]
+      ]
+    },
+    {
+      "angles_deg": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tcp_xyz_m": [
+        0.1416,
+        -0.064621,
+        0.436139
+      ],
+      "camera_xyz_m": [
+        0.0637,
+        -0.035276,
+        0.406795
+      ],
+      "camera_R": [
+        [
+          -3e-06,
+          3e-06,
+          1.0
+        ],
+        [
+          0.707112,
+          0.707102,
+          0.0
+        ],
+        [
+          -0.707102,
+          0.707112,
+          -4e-06
+        ]
+      ]
+    },
+    {
+      "angles_deg": [
+        15.0,
+        47.7,
+        33.1,
+        -33.0,
+        -24.0,
+        44.8
+      ],
+      "tcp_xyz_m": [
+        -0.107211,
+        -0.155252,
+        0.391194
+      ],
+      "camera_xyz_m": [
+        -0.160343,
+        -0.097437,
+        0.350882
+      ],
+      "camera_R": [
+        [
+          0.029957,
+          -0.71546,
+          0.698011
+        ],
+        [
+          0.953792,
+          -0.18841,
+          -0.234055
+        ],
+        [
+          0.298969,
+          0.67277,
+          0.676756
+        ]
+      ]
+    },
+    {
+      "angles_deg": [
+        -59.4,
+        38.5,
+        35.6,
+        -3.8,
+        -23.6,
+        -26.6
+      ],
+      "tcp_xyz_m": [
+        -0.199204,
+        0.098527,
+        0.416091
+      ],
+      "camera_xyz_m": [
+        -0.154505,
+        0.107793,
+        0.340548
+      ],
+      "camera_R": [
+        [
+          0.725401,
+          0.662338,
+          -0.187353
+        ],
+        [
+          -0.658359,
+          0.588186,
+          -0.469681
+        ],
+        [
+          -0.200889,
+          0.464053,
+          0.862727
+        ]
+      ]
+    },
+    {
+      "angles_deg": [
+        -29.4,
+        -6.6,
+        0.5,
+        6.4,
+        59.5,
+        35.1
+      ],
+      "tcp_xyz_m": [
+        0.11039,
+        0.003667,
+        0.43524
+      ],
+      "camera_xyz_m": [
+        0.022526,
+        -5.1e-05,
+        0.427714
+      ],
+      "camera_R": [
+        [
+          -0.493249,
+          -0.090713,
+          0.865145
+        ],
+        [
+          0.851822,
+          0.151271,
+          0.501514
+        ],
+        [
+          -0.176366,
+          0.984321,
+          0.002657
+        ]
+      ]
+    }
+  ]
+}

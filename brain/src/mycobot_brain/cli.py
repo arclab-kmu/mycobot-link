@@ -14,12 +14,13 @@ import contextlib
 import functools
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
 from typing import List, Optional
 
-from mycobot_brain import act, planner, vision
+from mycobot_brain import act, calib, drawers, grounding, pickplace, planner, vision
 from mycobot_brain.camera import DEFAULT_CAMERA_PORT, CameraError, CameraLink
 from mycobot_brain.link import DEFAULT_PORT, ArmLink, LinkError
 
@@ -122,9 +123,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     k.add_argument("--speed-param", type=int, default=100,
                    help="send_angles speed for every streamed tick; the arm server caps it with --max-speed")
 
+    pp = sub.add_parser("pick-place", help="look, let vLLM find what to pick and where to put it, do it; --execute to move")
+    pp.add_argument("instruction")
+    pp.add_argument("--calib", type=Path, required=True, help="scene geometry JSON (chain, camera K, table, block, box)")
+    pp.add_argument("--execute", action="store_true", help="move the arm (the arm server still checks every waypoint)")
+    pp.add_argument("--record", type=Path,
+                    help="run directory for events.jsonl and VLM images (default $MYCOBOT_RUNS_DIR or runs/, pp-<time>)")
+    pp.add_argument("--coords", choices=grounding.COORDS, default=pickplace.Settings.coords)
+    pp.add_argument("--shape", choices=grounding.SHAPES, default=pickplace.Settings.shape)
+    pp.add_argument("--speed", type=int, default=pickplace.Settings.speed)
+    pp.add_argument("--slow-speed", type=int, default=pickplace.Settings.slow_speed)
+    pp.add_argument("--max-step", type=float, default=pickplace.Settings.max_step, help="deg per joint per waypoint")
+    pp.add_argument("--settle", type=float, default=pickplace.Settings.settle, help="s still before each look")
+    pp.add_argument("--gripper-wait", type=float, default=pickplace.Settings.gripper_wait)
+    pp.add_argument("--attempts", type=int, default=pickplace.Settings.attempts)
+    pp.add_argument("--no-refine", action="store_true", help="skip the close-up looks")
+    pp.add_argument("--vllm-url", default=planner.DEFAULT_VLLM_URL)
+    pp.add_argument("--model", default=planner.DEFAULT_MODEL)
+
+    dr = sub.add_parser("drawer", help="put into / take out of / search the drawer cabinet; --execute to move")
+    dr.add_argument("instruction", help="e.g. '노란색 원뿔 찾아서 꺼내 줘'")
+    dr.add_argument("--calib", type=Path, required=True, help="scene geometry JSON with the cabinet section")
+    dr.add_argument("--execute", action="store_true", help="move the arm (the arm server still checks every waypoint)")
+    dr.add_argument("--record", type=Path,
+                    help="run directory for events.jsonl and VLM images (default $MYCOBOT_RUNS_DIR or runs/, dr-<time>)")
+    dr.add_argument("--view", choices=("tilted", "topdown"), default=drawers.DrawerSettings.view,
+                    help="how to look into an opened drawer")
+    dr.add_argument("--speed", type=int, default=drawers.DrawerSettings.speed)
+    dr.add_argument("--slow-speed", type=int, default=drawers.DrawerSettings.slow_speed)
+    dr.add_argument("--handle-speed", type=int, default=drawers.DrawerSettings.handle_speed)
+    dr.add_argument("--max-step", type=float, default=drawers.DrawerSettings.max_step, help="deg per joint per waypoint")
+    dr.add_argument("--settle", type=float, default=drawers.DrawerSettings.settle, help="s still before each look")
+    dr.add_argument("--gripper-wait", type=float, default=drawers.DrawerSettings.gripper_wait)
+    dr.add_argument("--no-refine", action="store_true", help="skip the close-up looks before a grasp")
+    dr.add_argument("--vllm-url", default=planner.DEFAULT_VLLM_URL)
+    dr.add_argument("--model", default=planner.DEFAULT_MODEL)
+
     args = p.parse_args(argv)
+    if args.cmd == "drawer" and not (0 < args.max_step <= 20
+                                     and 1 <= args.slow_speed <= args.speed <= planner.MAX_SPEED
+                                     and 1 <= args.handle_speed <= planner.MAX_SPEED):
+        p.error(f"drawer needs 0 < --max-step <= 20 and speeds in 1..{planner.MAX_SPEED}, --slow-speed <= --speed")
     if args.cmd == "act" and not (0 < args.max_step <= 20 and args.steps >= 1 and 1 <= args.speed <= planner.MAX_SPEED):
         p.error(f"act needs 0 < --max-step <= 20, --steps >= 1 and --speed in 1..{planner.MAX_SPEED}")
+    if args.cmd == "pick-place" and not (0 < args.max_step <= 20 and 1 <= args.slow_speed <= args.speed <= planner.MAX_SPEED):
+        p.error(f"pick-place needs 0 < --max-step <= 20 and 1 <= --slow-speed <= --speed <= {planner.MAX_SPEED}")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(message)s")
     if args.cmd == "console":
         from mycobot_brain.console import server, workspace
@@ -146,7 +189,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     with contextlib.ExitStack() as stack:
         try:
             link = camera = None
-            if args.cmd in ("look", "act"):
+            scene = calib.load(args.calib) if args.cmd in ("pick-place", "drawer") else None
+            if args.cmd == "drawer" and scene.fixture is None:
+                raise calib.CalibError(f"{args.calib} has no cabinet section")
+            if args.cmd in ("look", "act", "pick-place", "drawer"):
                 camera = stack.enter_context(CameraLink(args.host, args.camera_port))
             if args.cmd != "look":
                 link = stack.enter_context(ArmLink(args.host, args.port))
@@ -196,7 +242,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                     locked=args.lock, speed=args.speed, settle=args.settle, execute=args.execute,
                     record=args.record or Path("runs") / f"act-{_stamp()}", camera_kind=args.camera,
                 )
-        except (LinkError, CameraError, planner.PlannerError, act.ActStopped) as exc:
+            elif args.cmd == "pick-place":
+                runs = Path(os.environ.get("MYCOBOT_RUNS_DIR", "runs"))
+                log = pickplace.RunLog(args.record or runs / f"pp-{_stamp()}", emit=_print)
+                settings = pickplace.Settings(
+                    execute=args.execute, speed=args.speed, slow_speed=args.slow_speed, max_step=args.max_step,
+                    settle=args.settle, gripper_wait=args.gripper_wait, attempts=args.attempts,
+                    coords=args.coords, shape=args.shape, refine=not args.no_refine,
+                )
+                vlm = functools.partial(planner.chat, base_url=args.vllm_url)
+                result = pickplace.PickPlace(link, camera, scene, vlm, log, settings, model=args.model).run(
+                    args.instruction)
+                if result["ok"] is False:
+                    return 2
+            elif args.cmd == "drawer":
+                runs = Path(os.environ.get("MYCOBOT_RUNS_DIR", "runs"))
+                log = pickplace.RunLog(args.record or runs / f"dr-{_stamp()}", emit=_print)
+                settings = drawers.DrawerSettings(
+                    execute=args.execute, speed=args.speed, slow_speed=args.slow_speed, max_step=args.max_step,
+                    settle=args.settle, gripper_wait=args.gripper_wait, refine=not args.no_refine,
+                    handle_speed=args.handle_speed, view=args.view,
+                )
+                vlm = functools.partial(planner.chat, base_url=args.vllm_url)
+                result = drawers.DrawerTask(link, camera, scene, vlm, log, settings, model=args.model).run(
+                    args.instruction)
+                if result["ok"] is False:
+                    return 2
+        except (LinkError, CameraError, planner.PlannerError, act.ActStopped, pickplace.PickPlaceError,
+                calib.CalibError) as exc:
             print(f"mycobot-brain: {exc}", file=sys.stderr)
             return 1
     return 0

@@ -26,6 +26,8 @@ uv run pytest                      # includes test_e2e_rust.py if arm-server/tar
 uv run mycobot-brain status
 uv run mycobot-brain look                      # one camera frame -> vLLM description
 uv run mycobot-brain act "centre the tape roll" # camera -> vLLM -> joint step (--execute to send)
+uv run mycobot-brain pick-place "빨간 블록을 잡아서 갈색 상자 안에 넣어" --calib sim_calib.json  # --execute to move
+uv run mycobot-brain drawer "노란색 원뿔 찾아서 꺼내 줘" --calib sim_calib_drawers.json  # put / take / find
 
 # camera on the Jetson (python3 3.8 + ffmpeg, no venv)
 python3 camera-push/camera_push.py --brain <spark>:47901
@@ -74,7 +76,20 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   (`CameraLink`: second listener, newest JPEG, age measured on this side),
   `vision.py` (image requests: `describe`, `propose_step` = one bounded joint
   delta), `act.py` (look → step → settle → look loop; its limits only stop a
-  wandering model early), `cli.py`.
+  wandering model early), `kinematics.py` (FK/IK in firmware degrees, pixel →
+  ray → known plane; no depth image), `calib.py` (scene geometry file),
+  `grounding.py` (VLM locate/check requests, 0-1000 or pixel coordinates),
+  `pickplace.py` (look → locate → close look → grasp → check → place → check,
+  logged to `events.jsonl`), `fixture.py` (the drawer cabinet from the calib:
+  handles, pull axis, floors, catalogue, handover; never contents),
+  `drawer_vlm.py` (command parse, cabinet view, what is in a drawer),
+  `drawers.py` (`DrawerTask`, a `PickPlace` subclass: handle grips per the
+  calib's stages (side pinch, then top-down) + straight pull/push, in-drawer
+  pick, put, handover, find loop; joint moves routed round what is in the way;
+  every move after a set-down keeps off the object, taught legs over the
+  handover mat flagged at the start), `collision.py` (the calib's `robot_collision` capsules:
+  link pairs and links vs table/cabinet/handles/open trays, 5 mm, every 2 deg
+  of every move), `cli.py`.
 - `brain/src/mycobot_brain/console/`: the web console (`mycobot-brain console`).
   `feeds.py` (one upstream MJPEG reader per stream, fanned out), `vlm.py` (one
   VLM call -> an action chunk of up to 6 point/move/home/grip/wait steps),
@@ -88,6 +103,17 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
 - `camera-push/camera_push.py`: Jetson, Python 3.8 stdlib + `ffmpeg`. Grabs
   `/dev/video0` (MJPG), re-encodes every 1/rate-th frame, pushes the newest.
 - `tools/golden_frames.py`: pymycobot over a pty.
+- `tools/g1_grounding.py`: VLM pixels vs sim truth. `tools/g3_sim_run.sh` (one
+  seed: reset → record → `pick-place --execute` → truth) and `tools/g3_score.py`
+  (pass/fail from the run's raw files). `tools/d2_grounding.py`: the drawer
+  prompts on sim-scene's ground frames, per view and prompt variant.
+  `tools/d3_sim_run.sh` (one drawer run: reset with a layout → truth before →
+  record → `drawer --execute` → truth after) and `tools/d3_score.py`. Truth is
+  read only by these. `tools/d3_collision_replay.py`: a run's commanded path
+  through the brain's capsule check (sim-scene's hull audit is the one that
+  scores). `brain/tests/d0_brain.py`: the brain-side D0 - every drawer x slot x
+  shape, take and put (puts also into drawers already holding objects at
+  the reset slots), planned against the fake arm/camera/VLM, no motion.
 
 ## Relation to other repos
 
