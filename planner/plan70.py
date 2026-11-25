@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-LAB = Path("/home/hkim/Documents/lab-jetson/console")
+LAB = Path(__import__("os").environ.get("MYCOBOT_LAB", "~/Documents/lab-jetson/console")).expanduser()
 # spoon-head offset in the flange frame found on 2026-11-24 (the taped spoon sits 19 mm off the old estimate)
 import os  # noqa: E402
 

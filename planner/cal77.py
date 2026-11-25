@@ -5,7 +5,7 @@ plan   : print a console scenario: the empty hand hovers at ~12 spots over the t
 snap   : save one top photo (called by the scenario while the arm holds).
 fit    : centroid of the changed pixels in each open/closed pair <-> FK of a point in the flange frame;
          fits the camera pose in the .77 base frame (6) and that flange point (3) by Gauss-Newton on pixels.
-         Writes /home/hkim/Documents/lab-jetson/console/cal77_cam.json, used by locate.py from then on.
+         Writes $MYCOBOT_LAB/cal77_cam.json (not used by locate.py: the 2026-11-25 fit was rejected).
 """
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def hover_pose(xy, z_pad, scene, api, obs):
 def cmd_plan(args):
     from mycobot_brain.console import workspace
 
-    ws = workspace.load(str(locate.LAB / "workspace.json"))
+    ws = workspace.load(str(locate.lab_file("workspace.json")))
     api = ws.curobo_api
     # keep well clear of the cup and the vials: their positions are only as good as the map being fixed here
     import matcha_dyn

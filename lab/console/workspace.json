@@ -1,0 +1,204 @@
+{
+  "_note": "World = .77 arm base frame (mm). Top camera: calib_top3 (2026-11-22, Kabsch on gripper-plate holes, LOO 5-11 mm). .70 base pose: J1 sweep in D405 2026-11-23 (+-15 mm, z rough). Re-calibrate after any camera bump.",
+  "vlm_camera": "top",
+  "table_z_mm": 197.0,
+  "curobo_api": "http://127.0.0.1:8096",
+  "curobo_view": "http://127.0.0.1:8080",
+  "box": {
+    "lo_mm": [
+      -80.0,
+      -320.0,
+      212.0
+    ],
+    "hi_mm": [
+      330.0,
+      420.0,
+      420.0
+    ],
+    "reach_mm": 270.0
+  },
+  "cameras": {
+    "top": {
+      "label": "Top · D435i (.70)",
+      "color_mjpg": "http://127.0.0.1:8090/color.mjpg",
+      "depth_mjpg": "http://127.0.0.1:8090/depth.mjpg",
+      "color_jpg": "http://127.0.0.1:8090/color.jpg",
+      "depth_png": "http://127.0.0.1:8090/depth.png",
+      "K": {
+        "fx": 606.38916015625,
+        "fy": 606.2594604492188,
+        "ppx": 320.3999328613281,
+        "ppy": 243.50770568847656
+      },
+      "R": [
+        [
+          0.57968,
+          0.81484,
+          -0.00266
+        ],
+        [
+          0.81447,
+          -0.57951,
+          -0.02837
+        ],
+        [
+          -0.02466,
+          0.01427,
+          -0.99959
+        ]
+      ],
+      "t": [
+        -14.50448,
+        -228.4234,
+        717.69484
+      ],
+      "depth_K": {
+        "fx": 380.8627014160156,
+        "fy": 380.8627014160156,
+        "ppx": 317.6974182128906,
+        "ppy": 237.435791015625
+      },
+      "R_dc": [
+        [
+          0.9999464154243469,
+          0.00952951330691576,
+          0.004041289445012808
+        ],
+        [
+          -0.009539746679365635,
+          0.9999513030052185,
+          0.002520550275221467
+        ],
+        [
+          -0.004017072729766369,
+          -0.00255896826274693,
+          0.9999886751174927
+        ]
+      ],
+      "t_dc": [
+        14.64190799742937,
+        0.007076869223965332,
+        0.2481822739355266
+      ],
+      "depth_set": "http://127.0.0.1:8090/set?near=300&far=800"
+    },
+    "side": {
+      "label": "Side · D405 (.77)",
+      "color_mjpg": "http://127.0.0.1:8092/color.mjpg",
+      "depth_mjpg": "http://127.0.0.1:8092/depth.mjpg",
+      "color_jpg": "http://127.0.0.1:8092/color.jpg",
+      "depth_png": "http://127.0.0.1:8092/depth.png",
+      "depth_set": "http://127.0.0.1:8092/set?near=70&far=600"
+    }
+  },
+  "arms": {
+    "77": {
+      "label": ".77 gripper arm",
+      "port": 30977,
+      "origin_mm": [
+        -89.1,
+        55.2,
+        12.0
+      ],
+      "yaw_deg": 0.0,
+      "tool_mm": [
+        0,
+        0,
+        100.0
+      ],
+      "home_deg": null,
+      "R_base": [
+        [
+          0.9958092233768817,
+          0.0396463670062906,
+          0.08241453889171618
+        ],
+        [
+          -0.04383296924713224,
+          0.9978055540806711,
+          0.04962607230826171
+        ],
+        [
+          -0.08026619116733788,
+          -0.05303057447329231,
+          0.9953617918759595
+        ]
+      ]
+    },
+    "70": {
+      "label": ".70 blue arm (spoon)",
+      "port": 30978,
+      "origin_mm": [
+        188.0,
+        313.0,
+        -25.0
+      ],
+      "yaw_deg": -94.0,
+      "tool_mm": [
+        -70.8,
+        -98.7,
+        21.5
+      ],
+      "home_deg": [
+        1.93,
+        -1.75,
+        7.38,
+        -13.71,
+        1.58,
+        -132.45
+      ]
+    }
+  },
+  "obstacles": [
+    {
+      "name": "board",
+      "center_mm": [
+        407.1,
+        -55.0,
+        90.0
+      ],
+      "dims_mm": [
+        600,
+        900,
+        214
+      ],
+      "yaw_deg": -10.57,
+      "_src": "board_edge.npy fit 2026-11-22; top = table_z 197",
+      "frame": "77"
+    },
+    {
+      "name": "arm70",
+      "center_mm": [
+        188.0,
+        313.0,
+        212.5
+      ],
+      "dims_mm": [
+        130,
+        130,
+        475
+      ],
+      "yaw_deg": 0,
+      "skip_for": "70",
+      "_src": ".70 base from the 2026-11-23 J1 sweep (+-15 mm); body box rough"
+    },
+    {
+      "name": "arm77",
+      "center_mm": [
+        0,
+        0,
+        216.5
+      ],
+      "dims_mm": [
+        110,
+        110,
+        467
+      ],
+      "yaw_deg": 0,
+      "skip_for": "77",
+      "_src": "rough body box of the .77 arm (only for planning the .70 arm)",
+      "frame": "77"
+    }
+  ],
+  "_note_recal": "2026-11-24: world = calib_top3 frame (the top camera moved after 11-23 10:34; .70 and the D405 live in this frame). .77 base pose = Kabsch on 6 plate-hole points (rms 6.9 mm, LOO 6-18 mm; arm sag included). Grasp/pour still need camera-relative correction."
+}

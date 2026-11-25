@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "brain" / "src"))
 import plan77
 from mycobot_brain.console import workspace
 
-WS = workspace.load('/home/hkim/Documents/lab-jetson/console/workspace.json')
+import locate  # noqa: E402
+WS = workspace.load(str(locate.lab_file('workspace.json')))
 OBS = WS.obstacles_for(WS.arms['77'])
 API = WS.curobo_api
 

@@ -8,6 +8,7 @@ in the camera world directly.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,8 +18,17 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "brain" / "src"))
 from mycobot_brain.console import workspace  # noqa: E402
 
-LAB = Path("/home/hkim/Documents/lab-jetson/console")
-CAM = workspace.load(str(LAB / "workspace.before-recal-20261124.json")).cameras["top"]
+LAB = Path(os.environ.get("MYCOBOT_LAB", "~/Documents/lab-jetson/console")).expanduser()
+REPO_LAB = HERE.parent / "lab" / "console"
+
+
+def lab_file(name: str) -> Path:
+    """A lab file from MYCOBOT_LAB, or the snapshot in the repository's lab/console/ if it is missing there."""
+    p = LAB / name
+    return p if p.exists() else REPO_LAB / name
+
+
+CAM = workspace.load(str(lab_file("workspace.before-recal-20261124.json"))).cameras["top"]
 CAP_Z, RIM_Z = 264.0, 286.0
 
 

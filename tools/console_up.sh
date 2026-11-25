@@ -27,5 +27,10 @@ if port_free 8096; then
   "$CUROBO/scripts/run.sh" server > /tmp/curobo-plan-server.log 2>&1 & pids+=($!)
   echo "cuRobo warming up (about 60 s; log /tmp/curobo-plan-server.log)"
 fi
+# command-box scenarios that sit next to the workspace file (measure-and-plan generators, see planner/README.md)
+scen=()
+for f in matcha_live matcha_grasp_test matcha_move_test cal77_scenario; do
+  [ -f "$(dirname "$WS")/$f.json" ] && scen+=(--scenario "$(dirname "$WS")/$f.json")
+done
 cd "$HERE/brain"
-uv run --extra console mycobot-brain -v console --workspace "$WS"
+uv run --extra console mycobot-brain -v console --workspace "$WS" "${scen[@]}"

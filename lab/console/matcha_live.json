@@ -1,0 +1,4 @@
+{"trigger": "컵에 말차 가루를 타 줘", "title": "말차 타기 (지금 위치로 계획)",
+ "say": "위 카메라로 컵과 말차 병의 지금 위치를 재고 바로 계획합니다.",
+ "generator": {"cmd": ["/home/hkim/IsaacLab/.venv/bin/python", "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
+                       "--photo-dir", "/home/hkim/Documents/lab-jetson/console/plans/last"], "timeout_s": 60}}

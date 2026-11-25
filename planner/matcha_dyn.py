@@ -29,7 +29,7 @@ import plan70  # noqa: E402
 import plan77  # noqa: E402
 from mycobot_brain.console import workspace  # noqa: E402
 
-WS = workspace.load(str(locate.LAB / "workspace.json"))
+WS = workspace.load(str(locate.lab_file("workspace.json")))
 API = WS.curobo_api
 CONSOLE = "http://127.0.0.1:8095"
 BACKLASH70 = [1.4, 1.0, 1.0, 1.0, 1.1, 0.7]
