@@ -108,11 +108,13 @@ class Console:
         self._extra: list[dict] = []
         self._touch_xy: list[np.ndarray] = []
         self.runner = None
+        self.runner2 = None  # a scenario phase that runs alongside another arm's phase
         self.kins: dict[str, Any] = {}
         try:
             from mycobot_brain.console.motion import MotionRunner
 
             self.runner = MotionRunner(rate_hz=rate_hz, speed_param=speed_param)
+            self.runner2 = MotionRunner(rate_hz=rate_hz, speed_param=speed_param)
             for name, arm in ws.arms.items():
                 self.kins[name] = MotionRunner.kinematics(arm.tool)
         except ImportError as exc:
@@ -241,8 +243,9 @@ class Console:
         return {"ok": True}
 
     def stop(self) -> dict[str, Any]:
-        if self.runner is not None:
-            self.runner.stop()
+        for runner in (self.runner, self.runner2):
+            if runner is not None:
+                runner.stop()
         if self.task is not None:
             self.task["stop"] = True
         for link in self.links.values():
@@ -482,8 +485,7 @@ class Console:
             if not execute:
                 t.update(status="계획만 (실행 꺼짐)")
                 return
-            step0 = 0
-            for ph, segs, full in built:
+            def run_phase(ph, segs, full, runner, step0, hook=None):
                 arm = ph["arm"]
                 link = self.links[arm]
                 st = link.latest_state()
@@ -499,7 +501,7 @@ class Console:
                         curobo_post(self.ws.curobo_api, "/show_plan", {"q": np.round(full[::2], 2).tolist(), "dt": 0.2})
                     except Exception as exc:  # noqa: BLE001 - the view is optional
                         self.say(f"! cuRobo view: {exc}")
-                self.runner.bias[arm] = np.zeros(6)  # the scenario's paths already carry the feed-forward
+                runner.bias[arm] = np.zeros(6)  # the scenario's paths already carry the feed-forward
 
                 def on_tick(q_cmd, arm=arm, link=link):
                     if logf is not None:
@@ -507,11 +509,63 @@ class Console:
                         logf.write(json.dumps({"t": round(time.time(), 3), "arm": arm, "cmd": np.round(q_cmd, 2).tolist(),
                                                "q": s_.get("angles_deg"), "seq": s_.get("seq")}) + "\n")
 
-                stats = self.runner.run(link, self.kins[arm], segs, float(ph.get("speed_dps", 60)),
-                                        on_step=lambda i, s0=step0: t.update(step=s0 + i), on_tick=on_tick, arm=arm)
+                def on_step(i, s0=step0):
+                    t.update(step=s0 + i)
+                    if hook is not None:
+                        hook(i)
+
+                stats = runner.run(link, self.kins[arm], segs, float(ph.get("speed_dps", 60)),
+                                   on_step=on_step, on_tick=on_tick, arm=arm)
                 self.say(f"{arm} done {stats['t']:.1f} s, refused {stats['fails']}, max track err "
                          f"{stats['max_err_deg']:.1f} deg, end err {stats.get('final_err_deg', 0):.1f} deg")
-                step0 += len(segs)
+
+            # A phase with "start_with": {"step": k, "delay_s": d} starts d s after the previous phase
+            # reaches its segment k, on the second runner; the two-arm clearance is checked offline.
+            step0, k = 0, 0
+            while k < len(built):
+                ph, segs, full = built[k]
+                nxt = built[k + 1] if k + 1 < len(built) else None
+                sw = nxt[0].get("start_with") if nxt else None
+                if not sw:
+                    run_phase(ph, segs, full, self.runner, step0)
+                    step0 += len(segs)
+                    k += 1
+                    continue
+                if self.runner2 is None:
+                    raise RuntimeError("no second motion runner for an overlapping phase")
+                go, abort, box = threading.Event(), threading.Event(), {}
+                s_side = step0 + len(segs)
+
+                def side(nxt=nxt, sw=sw, s0=s_side):
+                    go.wait()
+                    if abort.wait(float(sw.get("delay_s", 0.0))) or t.get("stop"):
+                        return
+                    self.say(f"{nxt[0]['arm']} starts alongside ({sw.get('delay_s', 0)} s after step {sw['step']})")
+                    try:
+                        run_phase(*nxt, self.runner2, s0)
+                    except Exception as exc:  # noqa: BLE001 - stop the other arm too, re-raised below
+                        box["exc"] = exc
+                        self.say(f"! {nxt[0]['arm']}: {type(exc).__name__}: {exc}")
+                        self.runner.stop()
+
+                th = threading.Thread(target=side, name="scenario-side", daemon=True)
+                th.start()
+                try:
+                    run_phase(ph, segs, full, self.runner, step0,
+                              hook=lambda i, k_=int(sw["step"]): go.set() if i >= k_ else None)
+                except BaseException:
+                    abort.set()
+                    self.runner2.stop()
+                    raise
+                finally:
+                    go.set()
+                    if abort.is_set():
+                        th.join(timeout=5.0)
+                th.join()
+                if "exc" in box:
+                    raise box["exc"]
+                step0 += len(segs) + len(nxt[1])
+                k += 2
             t.update(status="완료", progress=1.0)
         except Exception as exc:  # noqa: BLE001 - surface anything on the page
             self.say(f"! {type(exc).__name__}: {exc}")
