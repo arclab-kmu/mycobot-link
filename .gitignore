@@ -12,3 +12,6 @@ build/
 
 # brain look/act records (frames, steps.jsonl)
 runs/
+
+# planner: large .70 IK seed table (copy from the lab machine; not needed by plan70)
+planner/data/seeddb.npz

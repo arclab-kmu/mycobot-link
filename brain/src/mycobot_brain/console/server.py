@@ -223,8 +223,10 @@ class Console:
             from mycobot_brain.console import scenario as sc_mod
 
             execute = bool(body.get("execute"))
-            self.task = {"text": text, "arm": sc["phases"][0]["arm"], "running": True, "phase": "plan",
-                         "status": "미리 계획한 시나리오 (VLM 안 씀)", "say": sc.get("say", ""), "seen": sc.get("seen", ""),
+            gen = bool(sc.get("generator"))
+            self.task = {"text": text, "arm": sc["phases"][0]["arm"] if sc.get("phases") else arm, "running": True, "phase": "plan",
+                         "status": "위 카메라로 측정하고 계획하는 중" if gen else "미리 계획한 시나리오 (VLM 안 씀)",
+                         "say": sc.get("say", ""), "seen": sc.get("seen", ""),
                          "steps": sc_mod.labels(sc), "step": -1, "progress": 0.0, "marks": {}, "execute": execute,
                          "scenario": sc.get("title", text)}
             self._task_thread = threading.Thread(target=self._run_scenario, args=(sc, execute), name="scenario", daemon=True)
@@ -464,7 +466,15 @@ class Console:
         t = self.task
         logf = open(self.tick_log, "a") if self.tick_log else None
         try:
-            self.say(f"시나리오 '{sc.get('title', sc['trigger'])}': 미리 측정·계획·검사한 관절 경로 (VLM 안 씀)")
+            if sc.get("generator"):
+                t0 = time.time()
+                self.say(f"시나리오 '{sc.get('title', sc['trigger'])}': 위 카메라로 지금 위치를 재고 계획합니다 (VLM 안 씀)")
+                sc = sc_mod.generate(sc, self.say)
+                t.update(say=sc.get("say", ""), seen=sc.get("seen", ""), steps=sc_mod.labels(sc),
+                         arm=sc["phases"][0]["arm"], scenario=sc.get("title", t.get("scenario")))
+                self.say(f"측정·계획 {time.time() - t0:.1f} s")
+            else:
+                self.say(f"시나리오 '{sc.get('title', sc['trigger'])}': 미리 측정·계획·검사한 관절 경로 (VLM 안 씀)")
             built = []
             for ph in sc["phases"]:
                 arm = ph["arm"]

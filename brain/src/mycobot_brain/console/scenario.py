@@ -36,15 +36,39 @@ def load(path: str | Path) -> dict[str, Any]:
     path = Path(path)
     sc = json.loads(path.read_text())
     sc["_dir"] = str(path.parent)
-    if not sc.get("trigger") or not sc.get("phases"):
-        raise ValueError(f"{path}: needs 'trigger' and 'phases'")
+    if not sc.get("trigger") or not (sc.get("phases") or sc.get("generator")):
+        raise ValueError(f"{path}: needs 'trigger' and 'phases' (or a 'generator')")
     return sc
+
+
+def generate(sc: dict[str, Any], say: Callable[[str], None]) -> dict[str, Any]:
+    """Run the scenario's generator (measure + plan now) and return the scenario it prints.
+
+    ``"generator": {"cmd": [...], "timeout_s": 60}``: the command prints one JSON scenario on stdout
+    (or ``{"error": "..."}``) and a short report on stderr, which goes to the page log line by line.
+    """
+    import subprocess
+
+    g = sc["generator"]
+    r = subprocess.run(g["cmd"], capture_output=True, text=True, timeout=float(g.get("timeout_s", 60)))
+    for line in r.stderr.splitlines():
+        if line.strip():
+            say(line.strip()[:400])
+    try:
+        out = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"generator printed no scenario ({exc})") from exc
+    if out.get("error") or r.returncode != 0:
+        raise RuntimeError(out.get("error") or f"generator exited {r.returncode}")
+    out["_dir"] = sc["_dir"]
+    out.setdefault("trigger", sc["trigger"])
+    return out
 
 
 def labels(sc: dict[str, Any]) -> list[str]:
     """One line per segment, for the page's step list."""
     out = []
-    for ph in sc["phases"]:
+    for ph in sc.get("phases", []):
         for seg in ph["segments"]:
             out.append(f"{ph['arm']} · {seg.get('label') or seg['kind']}")
     return out
@@ -96,10 +120,18 @@ def build(sc: dict[str, Any], phase: dict[str, Any], grab_jpeg: Callable[[str], 
             segs.append(Segment("wait", label=label, seconds=float(spec["seconds"])))
         elif kind == "center":
             segs.append(Segment("call", label=label, meta={"spec": spec}))
+        elif kind == "check":
+            segs.append(Segment("call", label=label, meta={"check": spec}))
+        elif kind == "align":
+            segs.append(Segment("call", label=label, meta={"align": spec}))
         else:
             raise ValueError(f"unknown segment kind {kind!r}")
     for k, seg in enumerate(segs):
-        if seg.kind == "call":
+        if seg.kind == "call" and "check" in seg.meta:
+            seg.fn = _check_call(seg.meta["check"], say)
+        elif seg.kind == "call" and "align" in seg.meta:
+            seg.fn = _align_call(seg.meta["align"], segs[k + 1:], say)
+        elif seg.kind == "call":
             seg.fn = _centre_call(sc, seg.meta["spec"], segs[k + 1:], grab_jpeg, say)
     return segs
 
@@ -134,20 +166,70 @@ def _centre_call(sc: dict[str, Any], spec: dict[str, Any], later: list[Segment],
         dq = -J @ err if n > dead else np.zeros(6)
         say(f"centring: offset ({err[0]:+.1f}, {err[1]:+.1f}) mm from {len(errs)} frames -> shift "
             + ", ".join(f"{x:+.1f}" for x in dq) + " deg")
-        for seg in later:
-            if seg.kind != "joints" or seg.q is None:
-                continue
-            mode, n_r = seg.meta.get("offset", "none"), max(1, seg.meta.get("ramp", 10))
-            idx = np.arange(len(seg.q), dtype=float)
-            if mode == "in":
-                w = _smooth(idx / n_r)
-            elif mode == "full":
-                w = np.ones(len(seg.q))
-            elif mode == "out":
-                w = 1.0 - _smooth((idx + 1) / n_r)
-            else:
-                continue
-            seg.q = seg.q + w[:, None] * dq[None, :]
+        _apply_offset(later, dq)
         return {"err_mm": err.tolist(), "dq_deg": dq.tolist()}
+
+    return run
+
+
+def _apply_offset(later: list[Segment], dq: np.ndarray) -> None:
+    """Add dq to the later joint segments by their offset mode: 'in' ramps in, 'full' adds, 'out' fades out."""
+    for seg in later:
+        if seg.kind != "joints" or seg.q is None:
+            continue
+        mode, n_r = seg.meta.get("offset", "none"), max(1, seg.meta.get("ramp", 10))
+        idx = np.arange(len(seg.q), dtype=float)
+        if mode == "in":
+            w = _smooth(idx / n_r)
+        elif mode == "full":
+            w = np.ones(len(seg.q))
+        elif mode == "out":
+            w = 1.0 - _smooth((idx + 1) / n_r)
+        else:
+            continue
+        seg.q = seg.q + w[:, None] * dq[None, :]
+
+
+def _align_call(spec: dict[str, Any], later: list[Segment], say: Callable[[str], None]) -> Callable[[], Any]:
+    """Run spec["cmd"] (it measures the tool-to-target offset in one camera image and prints
+    {"err_mm": [x, y], "msg": ...} as its last line), then shift the later segments by dq = -J @ err."""
+    import subprocess
+
+    J = np.array(spec["J"], float)
+    max_err = float(spec.get("max_err_mm", 25.0))
+    dead = float(spec.get("deadzone_mm", 1.5))
+
+    def run() -> dict[str, Any]:
+        r = subprocess.run(spec["cmd"], capture_output=True, text=True, timeout=float(spec.get("timeout_s", 15)))
+        last = (r.stdout.strip().splitlines() or ["{}"])[-1]
+        try:
+            out = json.loads(last)
+        except json.JSONDecodeError:
+            out = {"msg": last}
+        if r.returncode != 0 or "err_mm" not in out:
+            raise RuntimeError(out.get("msg") or f"align failed ({r.returncode})")
+        err = np.array(out["err_mm"], float)
+        n = float(np.hypot(*err))
+        if n > max_err:
+            raise RuntimeError(f"align: offset {n:.1f} mm is over {max_err:.0f} mm; stopping here")
+        dq = -J @ err if n > dead else np.zeros(J.shape[0])
+        say(f"align: {out.get('msg', '')} -> shift " + ", ".join(f"{x:+.1f}" for x in dq) + " deg")
+        _apply_offset(later, dq)
+        return {"err_mm": err.tolist(), "dq_deg": dq.tolist()}
+
+    return run
+
+
+def _check_call(spec: dict[str, Any], say: Callable[[str], None]) -> Callable[[], Any]:
+    """Run spec["cmd"] while the arm holds; a non-zero exit stops the scenario with the command's last line."""
+    import subprocess
+
+    def run() -> dict[str, Any]:
+        r = subprocess.run(spec["cmd"], capture_output=True, text=True, timeout=float(spec.get("timeout_s", 15)))
+        msg = (r.stdout.strip().splitlines() or [""])[-1]
+        if r.returncode != 0:
+            raise RuntimeError(msg or f"check failed ({r.returncode})")
+        say(f"check: {msg}")
+        return {"msg": msg}
 
     return run
