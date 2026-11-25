@@ -19,5 +19,5 @@ Lab-specific files the console and the planner read, kept here so the set-up can
 The Jetsons' `~/mycobot-link` checkouts sit at `792ccde`; their `mycobot-arm` binaries were rebuilt on 2026-11-24
 from the `25a8d50` source (`--query-guard-ms`). Rebuild there after pulling if the arm server changes again.
 
-Not in any repository yet: the cuRobo plan server (`~/manipulation/mycobot_curobo`, `scripts/plan_server.py`,
-robot configs and meshes), which `tools/console_up.sh` starts from `$CUROBO`.
+The cuRobo plan server, robot configs and meshes now live in `curobo/` of this repo (moved 2026-11-26);
+`tools/console_up.sh` starts it from there unless `$CUROBO` says otherwise.

@@ -136,6 +136,8 @@ ssh -R 47900:127.0.0.1:30977 er@192.168.0.77 \
   '~/mycobot-link/arm-server/target/release/mycobot-arm --brain 127.0.0.1:47900 --live --assume-yes --max-speed 100 --reply-timeout-ms 100'
 ```
 
+cuRobo 서버 코드와 로봇 URDF·mesh·설정은 `curobo/`에 있습니다(2026-11-26에 `~/manipulation/mycobot_curobo`에서 옮김). 이 폴더는 콘솔과 달리 별도 cuRobo venv(`~/manipulation/curobo/.venv`)에서 돕니다. 자세한 것은 `curobo/README.md`를 보세요.
+
 `--workspace`(기본 `~/Documents/lab-jetson/console/workspace.json`)에는 카메라 보정, 팔 기저 위치, 도구 길이, 안전 상자, 고정 장애물이 들어 있습니다. 카메라가 움직이면 이 파일을 다시 맞춥니다. "실행"을 체크하지 않으면 계획과 화면 표시까지만 하고 팔에 보내지 않습니다.
 
 실측 (2026-11-24, .77 팔, J6 사인파 스트리밍):

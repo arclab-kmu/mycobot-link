@@ -10,7 +10,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WS="${1:-$HOME/Documents/lab-jetson/console/workspace.json}"
-CUROBO="${CUROBO:-$HOME/manipulation/mycobot_curobo}"
+CUROBO="${CUROBO:-$HERE/curobo}"
 export SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-/run/user/$(id -u)/gcr/ssh}"
 SSH=(ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o LogLevel=ERROR)
 pids=()

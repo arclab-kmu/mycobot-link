@@ -122,8 +122,12 @@ uv run --no-project --with pymycobot==4.0.7 python tools/golden_frames.py
   Only the console imports it, and only `mycobot_control.qp` (pure numpy, no
   arm SDK): `[tool.uv.sources]` expects the clone next to this repo. Copy limit
   numbers deliberately and say where from; never take its backend or session.
-- `~/manipulation/mycobot_curobo`: `scripts/plan_server.py` (cuRobo plan /
-  check / spheres API on 8096, viser view on 8080) that the console calls.
+- `curobo/` (in this repo since 2026-11-26, moved from the unversioned
+  `~/manipulation/mycobot_curobo`, which is now a symlink here):
+  `scripts/plan_server.py` (cuRobo plan / check / spheres API on 8096, viser
+  view on 8080) that the console and `planner/` call, plus the robot URDFs,
+  meshes and cuRobo configs. It runs in the separate cuRobo venv
+  (`$CUROBO_DIR`, default `~/manipulation/curobo/.venv`); see `curobo/README.md`.
 - `~/manipulation/nero-control-cuda`: the lab's C++ NERO controller; the
   "core without ROS, dry-run first" design is shared.
 - Wiki record: `~/llm-wiki/queries/2026-10-23-spark-mycobot-link-and-language.md`.
