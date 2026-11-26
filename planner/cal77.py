@@ -90,6 +90,18 @@ def cmd_plan(args):
            [plan77.box(f"vial{i}", o[0], o[1], 197.0, 300.0, 80, 80) for i, o in enumerate(others)])[:15]
     spots = []
     grid = [(x, y) for y in range(-220, 61, 40) for x in (range(100, 241, 35) if (y // 40) % 2 else range(240, 99, -35))]
+    if args.ring:
+        # A new room with fixtures the planner cannot see yet (2026-11-26: the top camera's gooseneck tip and the side
+        # camera's tripod, both ~180-230 mm from the .77 base): hover only on rings close to the base, over a wide
+        # spread of bearings (the spread is what pins the map's rotation).
+        r_in, r_out = args.ring
+        grid = [(r * math.cos(math.radians(b)), r * math.sin(math.radians(b)))
+                for i, r in enumerate((r_in, (r_in + r_out) / 2, r_out))
+                for b in (range(-70, 71, 20) if i % 2 == 0 else range(70, -71, -20))]
+    if args.box:  # a rectangle of the .77 frame known to be over the table and away from fixtures
+        x0, x1, y0, y1 = args.box
+        xs, ys = np.linspace(x0, x1, 4), np.linspace(y0, y1, 4)
+        grid = [(float(x), float(y)) for j, y in enumerate(ys) for x in (xs if j % 2 == 0 else xs[::-1])]
     for k, (x, y) in enumerate(grid):
         heights = (300.0, 330.0, 360.0) if k % 2 == 0 else (360.0, 330.0, 300.0)
         for z in heights:
@@ -103,7 +115,9 @@ def cmd_plan(args):
         raise SystemExit(f"only {len(spots)} reachable hover spots")
     import matcha_dyn
     q_now = matcha_dyn.arm_q("77")
-    seq = [plan77.PARK if q_now is None else q_now] + [s[3] for s in spots] + [plan77.PARK]
+    start = plan77.PARK if q_now is None else q_now
+    # --end-here: come back to where the arm stood (2026-11-26: the taught PARK touched the raised board in cuRobo)
+    seq = [start] + [s[3] for s in spots] + [start if args.end_here else plan77.PARK]
     segs = []
     py = sys.executable
     me = str(Path(__file__).resolve())
@@ -334,6 +348,11 @@ if __name__ == "__main__":
     p.add_argument("--scene", help="json with cup77 and vials77 (to keep the hover spots clear of them)")
     p.add_argument("--clear", action="store_true", help="the table is empty: do not measure the cup and vials")
     p.add_argument("--speed", type=float, default=45.0, help="deg/s between spots (30 in a new room)")
+    p.add_argument("--ring", type=float, nargs=2, metavar=("R_IN", "R_OUT"),
+                   help="hover on three rings between these radii (mm) at bearings -70..70 instead of the grid")
+    p.add_argument("--end-here", action="store_true", help="return to the start pose instead of PARK")
+    p.add_argument("--box", type=float, nargs=4, metavar=("X0", "X1", "Y0", "Y1"),
+                   help="hover on a 4 x 4 grid over this rectangle of the .77 frame (mm) instead of the default grid")
     p = sp.add_parser("snap")
     p.add_argument("name")
     sp.add_parser("fit")
