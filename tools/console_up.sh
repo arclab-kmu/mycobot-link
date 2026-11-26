@@ -13,6 +13,11 @@
 # local (8100 already listening, so no tunnel):
 #   TOP_SSH=er@10.103.95.176 SIDE_SSH=er@10.102.90.89 MYCOBOT_LAB=~/Documents/lab-jetson/console tools/console_up.sh
 # then open http://127.0.0.1:8095 in a browser on the AGX's monitor.
+#
+# Since 2026-11-27 both cameras plug into the AGX itself. TOP_SSH=local / SIDE_SSH=local run the same viewer here on
+# 8090 / 8092 (no Jetson, no tunnel); tools/rs_nodes.py picks the nodes by USB product (D435i top, D405 side), or set
+# TOP_DEPTH/TOP_COLOR/SIDE_DEPTH/SIDE_COLOR yourself:
+#   TOP_SSH=local SIDE_SSH=local MYCOBOT_LAB=~/Documents/lab-jetson/console tools/console_up.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WS="${1:-${MYCOBOT_LAB:-$HOME/Documents/lab-jetson/console}/workspace.json}"
@@ -26,11 +31,27 @@ pids=()
 cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
-"${SSH[@]}" -p "$TOP_PORT" "$TOP_SSH" '~/rs_web_viewer/start.sh' >/dev/null
-"${SSH[@]}" -p "$SIDE_PORT" "$SIDE_SSH" '~/rs_web_viewer/start.sh' >/dev/null
 port_free() { ! ss -ltn "sport = :$1" | grep -q LISTEN; }
-port_free 8090 && { "${SSH[@]}" -p "$TOP_PORT" -N -L 8090:127.0.0.1:8090 "$TOP_SSH" & pids+=($!); }
-port_free 8092 && { "${SSH[@]}" -p "$SIDE_PORT" -N -L 8092:127.0.0.1:8090 "$SIDE_SSH" & pids+=($!); }
+camera() {  # ROLE HOST PORT LOCAL_PORT: a viewer on that Jetson + a tunnel, or (HOST=local) a viewer here
+  local role=$1 host=$2 port=$3 lp=$4
+  if [ "$host" = local ]; then
+    port_free "$lp" || { echo "$role camera: $lp already listening, kept"; return 0; }
+    eval "$(python3 "$HERE/tools/rs_nodes.py" env)"
+    local dv="${role}_DEPTH" cv="${role}_COLOR"
+    if [ -z "${!dv:-}" ] || [ -z "${!cv:-}" ]; then
+      echo "$role camera: no RealSense nodes found here (tools/rs_nodes.py)"; return 1
+    fi
+    python3 "$HERE/lab/jetson-viewer/rs_web_viewer.py" --port "$lp" --depth-dev "${!dv}" --color-dev "${!cv}" \
+      > "/tmp/rs-viewer-$lp.log" 2>&1 & pids+=($!)
+    echo "$role camera: viewer here on $lp (depth ${!dv}, color ${!cv}; log /tmp/rs-viewer-$lp.log)"
+  else
+    "${SSH[@]}" -p "$port" "$host" '~/rs_web_viewer/start.sh' >/dev/null
+    port_free "$lp" && { "${SSH[@]}" -p "$port" -N -L "$lp:127.0.0.1:8090" "$host" & pids+=($!); }
+  fi
+  return 0
+}
+camera TOP "$TOP_SSH" "$TOP_PORT" 8090
+camera SIDE "$SIDE_SSH" "$SIDE_PORT" 8092
 port_free 8100 && { "${SSH[@]}" -N -L 8100:127.0.0.1:8100 "$VLM_SSH" & pids+=($!); }
 if port_free 8096; then
   "$CUROBO/scripts/run.sh" server > /tmp/curobo-plan-server.log 2>&1 & pids+=($!)
