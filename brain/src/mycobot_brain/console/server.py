@@ -524,7 +524,9 @@ class Console:
                 arm = ph["arm"]
                 if arm not in self.links:
                     raise RuntimeError(f"scenario arm {arm!r} is not in the workspace")
-                segs = sc_mod.build(sc, ph, self._grab_jpeg, self.say)
+                link_ = self.links.get(arm)
+                segs = sc_mod.build(sc, ph, self._grab_jpeg, self.say,
+                                    read_gripper=(link_.read_gripper if link_ is not None else None))
                 full = np.vstack([s.q for s in segs if s.kind == "joints"])
                 secs = sum(len(s.q) * s.q_dt for s in segs if s.kind == "joints")
                 if self.curobo_ok:

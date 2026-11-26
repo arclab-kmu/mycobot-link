@@ -65,6 +65,11 @@ impl<A: Arm> Server<A> {
         &self.arm
     }
 
+    #[cfg(test)]
+    pub fn arm_mut(&mut self) -> &mut A {
+        &mut self.arm
+    }
+
     pub fn gate_open(&self) -> bool {
         self.gate_open
     }
@@ -129,6 +134,11 @@ impl<A: Arm> Server<A> {
                 speed,
             }) => vec![self.move_joints(id, &angles_deg, speed, now)],
             Ok(Request::Gripper { id, value, speed }) => vec![self.gripper(id, value, speed)],
+            Ok(Request::ReadGripper { id }) => vec![match self.arm.read_gripper() {
+                Ok(Some(v)) => Event::ok_value(id, i64::from(v)),
+                Ok(None) => Event::rejected(Some(id), "no gripper reading"),
+                Err(e) => Event::rejected(Some(id), format!("read_gripper failed: {e}")),
+            }],
         }
     }
 
@@ -312,6 +322,27 @@ mod tests {
 
     fn reply_ok(events: &[Event]) -> bool {
         matches!(events, [Event::Reply { ok: true, .. }])
+    }
+
+    #[test]
+    fn read_gripper_answers_with_the_value_even_with_the_gate_closed() {
+        let t0 = Instant::now();
+        let mut s = enabled(t0);
+        s.handle_line(r#"{"type":"gripper","id":2,"value":35,"speed":50}"#, t0);
+        s.handle_line(r#"{"type":"disable","id":3}"#, t0);
+        assert_eq!(
+            s.handle_line(r#"{"type":"read_gripper","id":4}"#, t0),
+            vec![Event::ok_value(4, 35)]
+        );
+        s.arm_mut().fail_reads = true;
+        assert!(matches!(
+            &s.handle_line(r#"{"type":"read_gripper","id":5}"#, t0)[..],
+            [Event::Reply {
+                ok: false,
+                id: Some(5),
+                ..
+            }]
+        ));
     }
 
     #[test]

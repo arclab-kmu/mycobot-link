@@ -11,6 +11,8 @@ pub trait Arm {
     fn read_angles(&mut self) -> io::Result<Option<[f64; 6]>>;
     fn send_angles(&mut self, angles_deg: &[f64; 6], speed: u8) -> io::Result<()>;
     fn set_gripper(&mut self, value: u8, speed: u8) -> io::Result<()>;
+    /// The gripper's reported opening (0 closed .. 100 open); `Ok(None)` = no usable reply.
+    fn read_gripper(&mut self) -> io::Result<Option<u8>>;
     fn stop(&mut self) -> io::Result<()>;
     fn is_live(&self) -> bool;
 }
@@ -24,6 +26,9 @@ impl<A: Arm + ?Sized> Arm for Box<A> {
     }
     fn set_gripper(&mut self, value: u8, speed: u8) -> io::Result<()> {
         (**self).set_gripper(value, speed)
+    }
+    fn read_gripper(&mut self) -> io::Result<Option<u8>> {
+        (**self).read_gripper()
     }
     fn stop(&mut self) -> io::Result<()> {
         (**self).stop()
@@ -67,6 +72,14 @@ impl Arm for DryRunArm {
             .push(format!("set_gripper_value {value} {speed}"));
         self.gripper = value;
         Ok(())
+    }
+
+    fn read_gripper(&mut self) -> io::Result<Option<u8>> {
+        Ok(if self.fail_reads {
+            None
+        } else {
+            Some(self.gripper)
+        })
     }
 
     fn stop(&mut self) -> io::Result<()> {
@@ -216,6 +229,13 @@ impl Arm for SerialArm {
 
     fn set_gripper(&mut self, value: u8, speed: u8) -> io::Result<()> {
         self.command(&frame::set_gripper_value(value, speed))
+    }
+
+    fn read_gripper(&mut self) -> io::Result<Option<u8>> {
+        Ok(self
+            .query(&frame::get_gripper_value())?
+            .as_ref()
+            .and_then(frame::decode_gripper))
     }
 
     fn stop(&mut self) -> io::Result<()> {

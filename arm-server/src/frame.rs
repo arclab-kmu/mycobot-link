@@ -170,6 +170,20 @@ pub fn decode_angles(frame: &Frame) -> Option<[f64; 6]> {
     Some(out)
 }
 
+/// The gripper's reported opening, 0 (closed) .. 100 (open). The 280 firmware answers with one
+/// byte; a two-byte answer is read as a big-endian i16, as `decode_angles` reads its values.
+pub fn decode_gripper(frame: &Frame) -> Option<u8> {
+    if frame.cmd != code::GET_GRIPPER_VALUE {
+        return None;
+    }
+    let v = match frame.data.as_slice() {
+        [b] => i32::from(*b),
+        [hi, lo] => i32::from(i16::from_be_bytes([*hi, *lo])),
+        _ => return None,
+    };
+    u8::try_from(v).ok().filter(|v| *v <= 100)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +230,27 @@ mod tests {
                 cmd: 0x29,
                 data: vec![]
             })
+        );
+    }
+
+    #[test]
+    fn gripper_value_decodes_one_or_two_bytes() {
+        let f = |data: Vec<u8>| {
+            decode_gripper(&Frame {
+                cmd: code::GET_GRIPPER_VALUE,
+                data,
+            })
+        };
+        assert_eq!(f(vec![37]), Some(37));
+        assert_eq!(f(vec![0, 64]), Some(64));
+        assert_eq!(f(vec![0, 200]), None);
+        assert_eq!(f(vec![]), None);
+        assert_eq!(
+            decode_gripper(&Frame {
+                cmd: code::GET_ANGLES,
+                data: vec![5]
+            }),
+            None
         );
     }
 

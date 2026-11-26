@@ -159,3 +159,26 @@ def test_parse_task_maps_none_and_rejects_unknown_names():
     assert vlm.parse_task('{"task": "none", "seen": "", "say": ""}', names)["task"] is None
     with pytest.raises(PlannerError):
         vlm.parse_task('{"task": "커피 타기", "seen": "", "say": ""}', names)
+
+
+def test_grip_check_stops_on_an_empty_hand_and_passes_a_held_vial():
+    from mycobot_brain.console import scenario as sc_mod
+
+    phase = {"arm": "77", "segments": [{"kind": "grip_check", "label": "잡기 확인", "min": 20, "max": 60, "gap_s": 0}]}
+    said = []
+    held = sc_mod.build({}, phase, lambda cam: None, said.append, read_gripper=lambda: 34)
+    assert held[0].fn()["value"] == 34 and "잡았어요" in said[-1]
+    empty = sc_mod.build({}, phase, lambda cam: None, said.append, read_gripper=lambda: 6)
+    try:
+        empty[0].fn()
+    except RuntimeError as exc:
+        assert "잡지 못했어요" in str(exc) and "빈손" in str(exc)
+    else:
+        raise AssertionError("an empty hand must stop the scenario")
+    nolink = sc_mod.build({}, phase, lambda cam: None, said.append)
+    try:
+        nolink[0].fn()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("no gripper reader must stop the scenario")

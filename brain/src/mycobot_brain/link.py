@@ -173,6 +173,14 @@ class ArmLink:
     def gripper(self, value: int, speed: int = 50) -> None:
         self.request({"type": "gripper", "value": int(value), "speed": int(speed)})
 
+    def read_gripper(self, timeout: float = 2.0) -> int:
+        """The gripper's reported opening, 0 (closed) .. 100 (open). Needs an arm server with ``read_gripper``
+        (2026-11-26); an older one rejects the request type, which raises here."""
+        r = self.request({"type": "read_gripper"}, timeout=timeout)
+        if r.get("value") is None:
+            raise LinkError("read_gripper reply without a value")
+        return int(r["value"])
+
     # -- internals ---------------------------------------------------------
 
     def _send(self, msg: Dict[str, Any]) -> None:

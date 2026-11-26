@@ -479,9 +479,23 @@ def grasp_jac(qg, step=1.0):
     return J
 
 
-def pick_segments(g, start, to_qa, label="말차 병 쪽으로"):
+# Gripper opening (arm server read_gripper, 0 closed .. 100 open) that means "a vial is between the fingers" after
+# the close-to-10 command. Measured 2026-11-26 at PARK: closed on nothing 11 (command 10) and 5 (command 0), so an
+# empty hand ends within a few units of the command; a vial stops the fingers well above it.
+GRIP_CLOSE = 10
+GRIP_HELD = (18.0, 80.0)
+# The pre-grasp alignment measures the finger midline from open/closed difference pixels, which mix parts at
+# different heights; seen at an angle by the top camera they can shift the midline sideways by ~10 mm. On
+# 2026-11-26 two runs shifted the hand by +9.6 and -9.6 mm and then closed beside the vial (side camera, gripper
+# reading 11). Until that is fixed and checked against a grasp, it only measures and logs.
+ALIGN_APPLY = False
+
+
+def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha"):
     """Approach to the pre-grasp, photograph the gripper open / closed, align on the vial in that image, finish
-    the approach (shift ramped in), grip, lift (shift faded out), check the lift. Returns (segments, paths)."""
+    the approach (shift ramped in), grip, check the gripper stopped on the vial, lift (shift faded out), check the
+    gripper still holds it and that the vial left its spot. Returns (segments, paths)."""
+    label = label or f"{name} 쪽으로"
     sub, qg, lift = g["sub"], g["q"], g["lift"]
     a1 = timed([([start] + to_qa[1:], 65.0), ([sub[0]], 25.0)])
     a2 = timed([([sub[0], sub[1]], 25.0), ([sub[2]], 14.0), ([qg], 8.0)])
@@ -500,28 +514,34 @@ def pick_segments(g, start, to_qa, label="말차 병 쪽으로"):
             {"kind": "check", "label": "사진(오므림)", "cmd": [py, me, "snap", "closed"]},
             {"kind": "grip", "label": "손가락 펴기", "value": 100},
             {"kind": "wait", "label": "펴는 중", "seconds": 1.0},
-            {"kind": "align", "label": "병에 맞추기(위 카메라)", "J": np.round(J, 4).tolist(), "max_err_mm": 25,
+            {"kind": "align", "label": "병에 맞추기(위 카메라)", "J": np.round(J, 4).tolist(), "max_err_mm": 25, "apply": ALIGN_APPLY,
              "cmd": [py, me, "measure", "--q", *[f"{x:.3f}" for x in sub[0]], "--vial", f"{g['vial'][0]:.2f}", f"{g['vial'][1]:.2f}",
                      "--approach", f"{a_dir[0]:.4f}", f"{a_dir[1]:.4f}"]},
             {"kind": "joints", "label": "마지막 접근", "q": R(a2), "dt": 0.05, "offset": "in", "ramp": 20},
-            {"kind": "grip", "label": "잡기", "value": 10},
-            {"kind": "wait", "label": "잡기 확인", "seconds": 0.2},
+            {"kind": "grip", "label": "잡기", "value": GRIP_CLOSE},
+            {"kind": "wait", "label": "잡는 중", "seconds": 1.5},
+            # 2026-11-26: a run lifted an empty hand and poured air; the camera check after the lift passed because
+            # the pushed vial no longer stood on its old spot. The gripper's own opening says it directly.
+            {"kind": "grip_check", "label": "잡았는지 확인(그리퍼)", "min": GRIP_HELD[0], "max": GRIP_HELD[1], "what": name},
             {"kind": "joints", "label": "들기", "q": R(up), "dt": 0.05, "offset": "out", "ramp": len(up)},
-            lift_check(g)]
+            {"kind": "grip_check", "label": "들고 있는지 확인(그리퍼)", "min": GRIP_HELD[0], "max": GRIP_HELD[1], "what": name},
+            lift_check(g, target)]
     return segs, [a1, a2, up]
 
 
-def lift_check(g):
-    """After the lift: the matcha cap must no longer stand at table height near where it stood (top camera depth)."""
+def lift_check(g, target="matcha"):
+    """After the lift: no cap of the target vial may still stand at table height near where it stood (top camera
+    depth), pushed a little included."""
     import locate  # noqa: E402 - planner module (camera model)
     px = locate.px_of77(g["vial"][:2], 264.0)
     return {"kind": "check", "label": "들렸는지 확인(위 카메라)", "timeout_s": 15,
-            "cmd": [sys.executable, str(HERE / "verify.py"), "lifted", "--px", f"{px[0]:.1f}", f"{px[1]:.1f}"]}
+            "cmd": [sys.executable, str(HERE / "verify.py"), "lifted", "--px", f"{px[0]:.1f}", f"{px[1]:.1f}",
+                    "--target", target]}
 
 
 
 def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40.0, place_comp_mm=3.8, q_start=None,
-               grasp_test=False):
+               grasp_test=False, name="말차 병", target="matcha"):
     """Returns (phase dict for the console scenario, info). ``others`` = [(x, y, top_z)] of the other vials."""
     t0 = time.perf_counter()
     sc = Scene(cup_xy, rim_z, cup_r, others)
@@ -568,7 +588,7 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
             qplace = qg
     tilt, TA = p["tilt"], p["tilt_angles"]
     k15 = TA.index(TA[-1] - 15)
-    pick, (a1, a2, up) = pick_segments(g, start, to_qa)
+    pick, (a1, a2, up) = pick_segments(g, start, to_qa, name=name, target=target)
     approach = np.vstack([a1, a2])
     carry = timed([([lift[-1]] + to_pour[1:], 45.0), (tilt, 30.0)])
     pts = [tilt[-1], tilt[k15], tilt[-1], tilt[k15], tilt[-1]]
@@ -579,7 +599,7 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     seg = lambda label, Q: {"kind": "joints", "label": label, "q": np.round(Q, 3).tolist(), "dt": 0.05}
     if grasp_test:  # approach, grip, lift to the top of the lift column, hold, put back, release, leave
         down = timed([([lift[-1]] + lift[::-1][1:], 25.0), ([qplace], 8.0)])
-        phase = {"arm": "77", "label": "말차 병 잡기 시험", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
+        phase = {"arm": "77", "label": f"{name} 잡기 시험", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
             *pick,
             seg("내려놓기", down), {"kind": "grip", "label": "놓기", "value": 100}, seg("park", leave)]}
         full = np.vstack([approach, up, down, leave])
@@ -588,7 +608,7 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
             raise PlanError(f"cuRobo check: collision at {chk.get('index')}/{chk.get('n')}: {chk.get('detail')}")
         return phase, dict(t_total_s=round(time.perf_counter() - t0, 2), grasp_pitch=g["pitch"], grasp_spin=g["spin"],
                            grasp_dz=g["dz"], grasp_shallow=g["shallow"], checked=chk.get("checked"))
-    phase = {"arm": "77", "label": "말차 병 털어 넣기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
+    phase = {"arm": "77", "label": f"{name} 털어 넣기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
         *pick,
         seg(f"컵 위로, {TA[-1]}도 기울이기", carry),
         {"kind": "wait", "label": "붓기", "seconds": 1.0},
@@ -613,7 +633,7 @@ MOVE_PITCHES = (0.0, 5.0, 8.0, 12.0, 15.0, 20.0, 25.0)  # a move needs no pour, 
 
 
 def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), rim_z=286.0, cup_r=40.0, place_comp_mm=3.8,
-              q_start=None):
+              q_start=None, name="말차 병", target="matcha"):
     """Pick the vial at vial_xy and stand it at to_xy (same hold: pitch, height and depth), then park."""
     t0 = time.perf_counter()
     sc = Scene(cup_xy, rim_z, cup_r, others)
@@ -649,12 +669,12 @@ def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), 
             qn, e = ik(h["q"], T)
             qplace = qn if e < 0.3 else h["q"]
         hs = h["sub"]
-        pick, (a1, a2, up) = pick_segments(g, start, to_qa)
+        pick, (a1, a2, up) = pick_segments(g, start, to_qa, name=name, target=target)
         approach = np.vstack([a1, a2])
         carry = timed([([g["lift"][-1]] + over[1:], 45.0), (h["lift"][::-1][1:], 25.0), ([qplace], 8.0)])
         leave = timed([([qplace, hs[2]], 12.0), ([hs[1], hs[0], h["qa"]], 30.0), (to_park[1:], 65.0)])
         seg = lambda label, Q: {"kind": "joints", "label": label, "q": np.round(Q, 3).tolist(), "dt": 0.05}  # noqa: E731
-        phase = {"arm": "77", "label": "말차 병 옮기기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
+        phase = {"arm": "77", "label": f"{name} 옮기기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
             *pick, seg("새 자리로 옮기기", carry), {"kind": "grip", "label": "놓기", "value": 100}, seg("park", leave)]}
         chk = cu_check(api, np.vstack([approach, up, carry, leave]), obs)
         if chk.get("ok"):

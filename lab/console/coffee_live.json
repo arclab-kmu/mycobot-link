@@ -1,0 +1,17 @@
+{
+ "trigger": "커피 타 줘",
+ "title": "커피 타기 (지금 위치로 계획)",
+ "say": "위 카메라로 컵과 커피 병(갈색, 초록이 아닌 뚜껑)의 지금 위치를 재고 바로 계획합니다.",
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
+   "--photo-dir",
+   "/home/hkim/Documents/lab-jetson/console/plans/last",
+   "--vial",
+   "coffee"
+  ],
+  "timeout_s": 60
+ },
+ "vlm_desc": "컵에 커피 가루(갈색 병)를 넣고 스푼으로 저어 커피 한 잔을 탄다 (커피 병 잡기, 붓기, 젓기까지 전체)"
+}

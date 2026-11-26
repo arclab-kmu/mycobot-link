@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -106,7 +107,7 @@ def match_template(gray: np.ndarray, tpl: np.ndarray, box: list[int]) -> tuple[f
 
 
 def build(sc: dict[str, Any], phase: dict[str, Any], grab_jpeg: Callable[[str], bytes | None],
-          say: Callable[[str], None]) -> list[Segment]:
+          say: Callable[[str], None], read_gripper: Callable[[], int] | None = None) -> list[Segment]:
     """Segments for one phase. ``center`` segments become calls that shift the later joint segments."""
     b = np.array(phase["backlash"], float) if phase.get("backlash") else None
     v0 = float(phase.get("v0", 1.0))
@@ -130,11 +131,15 @@ def build(sc: dict[str, Any], phase: dict[str, Any], grab_jpeg: Callable[[str], 
             segs.append(Segment("call", label=label, meta={"check": spec}))
         elif kind == "align":
             segs.append(Segment("call", label=label, meta={"align": spec}))
+        elif kind == "grip_check":
+            segs.append(Segment("call", label=label, meta={"grip_check": spec}))
         else:
             raise ValueError(f"unknown segment kind {kind!r}")
     for k, seg in enumerate(segs):
         if seg.kind == "call" and "check" in seg.meta:
             seg.fn = _check_call(seg.meta["check"], say)
+        elif seg.kind == "call" and "grip_check" in seg.meta:
+            seg.fn = _grip_check_call(seg.meta["grip_check"], read_gripper, say)
         elif seg.kind == "call" and "align" in seg.meta:
             seg.fn = _align_call(seg.meta["align"], segs[k + 1:], say)
         elif seg.kind == "call":
@@ -216,12 +221,39 @@ def _align_call(spec: dict[str, Any], later: list[Segment], say: Callable[[str],
             raise RuntimeError(out.get("msg") or f"align failed ({r.returncode})")
         err = np.array(out["err_mm"], float)
         n = float(np.hypot(*err))
+        if not spec.get("apply", True):  # measure-only: log what it saw, move nothing
+            say(f"align (측정만, 손은 안 옮김): {out.get('msg', '')}")
+            return {"err_mm": err.tolist(), "dq_deg": [0.0] * J.shape[0]}
         if n > max_err:
             raise RuntimeError(f"align: offset {n:.1f} mm is over {max_err:.0f} mm; stopping here")
         dq = -J @ err if n > dead else np.zeros(J.shape[0])
         say(f"align: {out.get('msg', '')} -> shift " + ", ".join(f"{x:+.1f}" for x in dq) + " deg")
         _apply_offset(later, dq)
         return {"err_mm": err.tolist(), "dq_deg": dq.tolist()}
+
+    return run
+
+
+def _grip_check_call(spec: dict[str, Any], read_gripper: Callable[[], int] | None,
+                     say: Callable[[str], None]) -> Callable[[], Any]:
+    """Stop unless the gripper's reported opening is inside [min, max]: closed on a vial it stops at the vial's
+    width, closed on nothing it goes further (2026-11-26: runs went on to pour an empty hand)."""
+    lo, hi = float(spec["min"]), float(spec["max"])
+    what = spec.get("what", "병")
+
+    def run() -> dict[str, Any]:
+        if read_gripper is None:
+            raise RuntimeError("grip_check: 이 팔의 그리퍼 값을 읽을 수 없어요")
+        vals = []
+        for _ in range(int(spec.get("reads", 3))):
+            vals.append(read_gripper())
+            time.sleep(float(spec.get("gap_s", 0.1)))
+        v = float(np.median(vals))
+        if not lo <= v <= hi:
+            why = "닫힘 쪽(빈손)" if v < lo else "열림 쪽"
+            raise RuntimeError(f"{what}을 잡지 못했어요: 그리퍼 값 {v:.0f} ({why}; 잡았을 때 {lo:.0f}–{hi:.0f})")
+        say(f"grip check: 그리퍼 값 {v:.0f} ({lo:.0f}–{hi:.0f}) — {what}을 잡았어요")
+        return {"value": v}
 
     return run
 

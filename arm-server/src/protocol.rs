@@ -34,6 +34,10 @@ pub enum Request {
         value: u32,
         speed: u32,
     },
+    /// Read the gripper's opening (no gate needed: it moves nothing). The reply carries `value`.
+    ReadGripper {
+        id: u64,
+    },
 }
 
 /// arm -> brain.
@@ -52,6 +56,8 @@ pub enum Event {
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<i64>,
     },
     State {
         seq: u64,
@@ -69,6 +75,16 @@ impl Event {
             id: Some(id),
             ok: true,
             error: None,
+            value: None,
+        }
+    }
+
+    pub fn ok_value(id: u64, value: i64) -> Self {
+        Event::Reply {
+            id: Some(id),
+            ok: true,
+            error: None,
+            value: Some(value),
         }
     }
 
@@ -77,6 +93,7 @@ impl Event {
             id,
             ok: false,
             error: Some(error.into()),
+            value: None,
         }
     }
 }
