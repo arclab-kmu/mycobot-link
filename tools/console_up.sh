@@ -34,7 +34,15 @@ port_free 8092 && { "${SSH[@]}" -p "$SIDE_PORT" -N -L 8092:127.0.0.1:8090 "$SIDE
 port_free 8100 && { "${SSH[@]}" -N -L 8100:127.0.0.1:8100 "$VLM_SSH" & pids+=($!); }
 if port_free 8096; then
   "$CUROBO/scripts/run.sh" server > /tmp/curobo-plan-server.log 2>&1 & pids+=($!)
-  echo "cuRobo warming up (about 60 s; log /tmp/curobo-plan-server.log)"
+  echo "cuRobo warming up (about 20-60 s; log /tmp/curobo-plan-server.log)"
+  # Wait for it: a /check during warmup's CUDA-graph capture killed the server on the AGX (2026-11-26,
+  # "operation not permitted when stream is capturing"), and the console reports curobo ok before that.
+  for _ in $(seq 1 180); do
+    grep -q "plan_server ready" /tmp/curobo-plan-server.log 2>/dev/null && break
+    kill -0 "${pids[-1]}" 2>/dev/null || { echo "cuRobo server exited; see /tmp/curobo-plan-server.log"; exit 1; }
+    sleep 1
+  done
+  grep -q "plan_server ready" /tmp/curobo-plan-server.log || echo "cuRobo not ready after 180 s; starting the console anyway"
 fi
 # command-box scenarios that sit next to the workspace file (measure-and-plan generators, see planner/README.md)
 scen=()
