@@ -37,7 +37,16 @@ HOUSING = np.array([[x, y, z, 1.0] for x in (-28, 0, 28) for y in (-28, 0, 30) f
 FING = np.array([[x, y, z, 1.0] for x in (-22, -12, 12, 22) for y in (-27, -15, -3) for z in (60, 75, 90)])
 GPTS = np.vstack([HOUSING, FING])
 LIM_MARGIN = 3.0
-OTHER_VIAL_MM = 28.0  # cuRobo box for a standing vial (cap 20 mm wide): ~4 mm margin a side
+# cuRobo box for a standing vial (cap 20 mm wide): 20 mm a side. With 28 mm (4 mm a side) the 2026-11-26 approach
+# knocked the neighbouring vial over although the plan (and the measured joints) kept 16 mm from it: the camera-to-arm
+# map is off by ~10 mm, and the arm model by a few more.
+OTHER_VIAL_MM = 60.0
+# Reach the pre-grasp from this far straight above it, and leave it the same way, so the low part of every
+# approach is a short vertical leg next to the vial instead of a sweep at vial height past its neighbours.
+APPROACH_RISE_MM = 70.0
+# Every grasp-chain pose (pre-grasp .. lift) keeps the gripper this far from the other vials. The 2026-11-26 pre-grasp
+# had its housing 21.5 mm from the neighbour, between two vials 87 mm apart.
+NEIGHBOUR_MM = 30.0
 
 
 class PlanError(RuntimeError):
@@ -147,7 +156,15 @@ class Scene:
         dd = np.hypot(P[:, 0] - self.C[0], P[:, 1] - self.C[1])
         low = P[:, 2] < self.top + 12
         m = float(np.min(dd[low] - (self.r + 6))) if low.any() else 99.0
-        return min(m, float(P[:, 2].min() - (TABLE + 10)))
+        return min(m, float(P[:, 2].min() - (TABLE + 10)), self.neighbour_clear(P))
+
+    def neighbour_clear(self, P) -> float:
+        """Gripper points to the other vials (cylinders r 11 mm up to their tops), minus NEIGHBOUR_MM."""
+        m = 99.0
+        for x, y, zt in self.others:
+            r = np.maximum(np.hypot(P[:, 0] - x, P[:, 1] - y) - 11.0, 0.0)
+            m = min(m, float(np.min(np.hypot(r, np.maximum(P[:, 2] - zt, 0.0)))) - NEIGHBOUR_MM)
+        return m
 
     def vial_margin(self, q, cap_inside=False, up_f=None) -> float:
         T = kin.fk(q)
@@ -185,6 +202,46 @@ def cu_plan(api, q0, q1, obstacles):
     if not r.get("ok"):
         raise PlanError(f"cuRobo plan failed ({r.get('status')}: {r.get('reason')})")
     return [np.array(q) for q in r["q"]]
+
+
+def above(q, rise):
+    """The same tool pose `rise` mm higher (None if the IK does not close)."""
+    T = kin.fk(q)
+    T[2, 3] += rise
+    qh, e = ik(q, T)
+    return qh if e <= 0.3 else None
+
+
+def path_down_to(api, q0, q1, obstacles, rise=APPROACH_RISE_MM, back_dir=None, back=25.0):
+    """q0 -> (cuRobo) -> `rise` mm above a point `back` mm behind q1 (against back_dir, the approach) -> straight
+    down -> forward to q1, so the open fingers never come down onto the vial they reach for; the direct path if no
+    such poses plan."""
+    q1 = np.asarray(q1, float)
+    qb = q1
+    if back_dir is not None and back > 0:
+        T = kin.fk(q1)
+        T[:2, 3] -= back * np.asarray(back_dir, float) / np.linalg.norm(back_dir)
+        qb, e = ik(q1, T)
+        if e > 0.3:
+            qb = q1
+    qh = above(qb, rise)
+    if qh is not None:
+        try:
+            return cu_plan(api, q0, qh, obstacles) + ([qb] if qb is not q1 else []) + [q1]
+        except PlanError:
+            pass
+    return cu_plan(api, q0, q1, obstacles)
+
+
+def path_up_from(api, q0, q1, obstacles, rise=APPROACH_RISE_MM):
+    """q0 -> straight up `rise` mm -> (cuRobo) -> q1; the direct path if no such pose plans."""
+    qh = above(q0, rise)
+    if qh is not None:
+        try:
+            return [np.asarray(q0, float)] + cu_plan(api, qh, q1, obstacles)
+        except PlanError:
+            pass
+    return cu_plan(api, q0, q1, obstacles)
 
 
 def cu_check(api, Q, obstacles):
@@ -487,11 +544,11 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
         raise p
     t_ik = time.perf_counter() - t0
     start = PARK if q_start is None else np.asarray(q_start, float)
-    to_qa = thin(cu_plan(api, start, g["qa"], obs))
+    to_qa = thin(path_down_to(api, start, g["qa"], obs, back_dir=g["a_dir"]))
     lift_top = g["lift"][-1]
     to_pour = thin(cu_plan(api, lift_top, p["q40"], obs))
     from_pour = thin(cu_plan(api, p["q40"], lift_top, obs))
-    to_park = thin(cu_plan(api, g["qa"], PARK, obs))
+    to_park = thin(path_up_from(api, g["qa"], PARK, obs))
     for nm, path in (("to the cup", to_pour), ("back from the cup", from_pour)):
         vm = min(sc.vial_margin(q, False, p["up_f"]) for q in path)
         gc = min(sc.grip_clear(q) for q in path)
@@ -576,9 +633,9 @@ def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), 
             skip.add(g["key"])
             why.append(f"{g['key']}: place {str(exc)[:60]}")
             continue
-        to_qa = thin(cu_plan(api, start, g["qa"], obs))
+        to_qa = thin(path_down_to(api, start, g["qa"], obs, back_dir=g["a_dir"]))
         over = thin(cu_plan(api, g["lift"][-1], h["lift"][-1], obs))
-        to_park = thin(cu_plan(api, h["qa"], PARK, obs))
+        to_park = thin(path_up_from(api, h["qa"], PARK, obs))
         vm = min(sc.vial_margin(q) for q in over)
         if vm < 0:
             skip.add(g["key"])

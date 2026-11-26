@@ -158,7 +158,10 @@ def measure(photo_dir=None):
 #: Spots in the .77 frame (mm) from which the flat grasp + 140 deg pour planned on 2026-11-25 (reach map);
 #: a vial that cannot be poured from where it stands is moved to the nearest free one first.
 NEAR_SPOTS = [(157.0, -164.0), (150.0, -140.0), (165.0, -185.0), (140.0, -120.0), (170.0, -140.0), (130.0, -150.0)]
-SPOT_CLEAR_CUP, SPOT_CLEAR_VIAL = 95.0, 60.0  # centre distances (mm) from the cup and the other vials
+# centre distances (mm) from the cup and the other vials; a vial needs ~100 mm around it for the gripper to keep
+# plan77.NEIGHBOUR_MM from its neighbours (2026-11-26: 87 mm apart left no grasp, 100 mm planned)
+SPOT_CLEAR_CUP, SPOT_CLEAR_VIAL = 95.0, 100.0
+NEIGHBOUR_HINT_MM = 100.0
 RELOCATE_BUDGET_S = 40.0
 
 
@@ -189,6 +192,10 @@ def relocate(vial77, cup77, others77, start77, t0):
             f"then pour from there")
         info77 = dict(info77, moved_to=list(s), move_pick=info_mv["pick"])
         return ph_mv, ph77, info77, s
+    near = min((math.dist(vial77, o[:2]) for o in others77), default=1e9)
+    if near < NEIGHBOUR_HINT_MM:
+        raise plan77.PlanError(f"말차 병 옆의 다른 병이 {near / 10:.1f} cm로 가까워서 손가락이 들어갈 자리가 없어요. "
+                               f"다른 병을 말차 병에서 {NEIGHBOUR_HINT_MM / 10 + 2:.0f} cm 이상 떨어뜨려 주세요.")
     raise plan77.PlanError("말차 병을 붓기 좋은 자리로 옮기는 계획도 찾지 못했어요: " + "; ".join(tried[-3:] or ["빈 자리 없음"]))
 
 
