@@ -1,0 +1,19 @@
+{
+ "trigger": "커피 병 잡기 시험",
+ "title": "커피 병 잡고 들었다 놓기 (시험)",
+ "say": "위 카메라로 커피 병(초록이 아닌 뚜껑)을 찾아 잡고, 들었다가 같은 자리에 놓습니다.",
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
+   "--only",
+   "grasp",
+   "--photo-dir",
+   "/home/hkim/Documents/lab-jetson/console/plans/last_grasp",
+   "--vial",
+   "coffee"
+  ],
+  "timeout_s": 60
+ },
+ "vlm": false
+}

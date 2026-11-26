@@ -522,9 +522,10 @@ ALIGN_APPLY = False
 
 
 def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha"):
-    """Approach to the pre-grasp, photograph the gripper open / closed, align on the vial in that image, finish
-    the approach (shift ramped in), grip, check the gripper stopped on the vial, lift (shift faded out), check the
-    gripper still holds it and that the vial left its spot. Returns (segments, paths)."""
+    """Approach and finish the approach to the planned grasp; there, photograph the fingers open / slightly closed,
+    move by the vial's offset from the pads, look again and close only if the vial is between the fingers (else
+    stop open); check the gripper stopped on the vial, lift (shift faded out), check it still holds the vial and
+    that the vial left its spot. Returns (segments, paths)."""
     label = label or f"{name} 쪽으로"
     sub, qg, lift = g["sub"], g["q"], g["lift"]
     a1 = timed([([start] + to_qa[1:], 65.0), ([sub[0]], 25.0)])
@@ -536,18 +537,33 @@ def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha
     R = lambda Q: np.round(Q, 3).tolist()  # noqa: E731
     # Waits: right after a joint stream the gripper starts late; on 2026-11-26 the "closed" photo 1.3 s after the
     # command still showed open fingers (0 px changed), while 1.5 s after it at rest the change was ~2800 px.
+    ins = str(HERE / "inside.py")
+    meas = [py, ins, "measure", "--q", *[f"{x:.3f}" for x in qg], "--vial", f"{g['vial'][0]:.2f}", f"{g['vial'][1]:.2f}",
+            "--approach", f"{a_dir[0]:.4f}", f"{a_dir[1]:.4f}"]
+    hold = lambda n: R(np.repeat(np.asarray(qg, float)[None], n, axis=0))  # noqa: E731 - stand still; a shift moves it
+
+    def look(tag):  # open / slightly closed photo pair at the grasp pose. 75, not 60: at 60 a pad touched and
+        # nudged a vial sitting 10 mm off-centre (2026-11-26); the pads still move enough to be seen.
+        return [{"kind": "check", "label": f"사진(열림){tag}", "cmd": [py, ins, "snap", "g_open"]},
+                {"kind": "grip", "label": "살짝 오므리기", "value": 75},
+                {"kind": "wait", "label": "오므리는 중", "seconds": 1.2},
+                {"kind": "check", "label": f"사진(살짝 오므림){tag}", "cmd": [py, ins, "snap", "g_half"]},
+                {"kind": "grip", "label": "펴기", "value": 100},
+                {"kind": "wait", "label": "펴는 중", "seconds": 0.8}]
+
+    # Hojin 2026-11-26: "그리퍼 내부에 들어오면 오므리자". At the planned grasp pose, look where the vial is relative
+    # to the pads, move by that, look again, and close only if the vial is between the fingers; otherwise stop
+    # without closing (closing on the vial's near edge had pushed it away three times that day).
     segs = [{"kind": "joints", "label": label, "q": R(a1), "dt": 0.05},
-            {"kind": "wait", "label": "멈춤", "seconds": 0.5},
-            {"kind": "check", "label": "사진(열림)", "cmd": [py, me, "snap", "open"]},
-            {"kind": "grip", "label": "손가락 오므리기", "value": 40},
-            {"kind": "wait", "label": "오므리는 중", "seconds": 1.5},
-            {"kind": "check", "label": "사진(오므림)", "cmd": [py, me, "snap", "closed"]},
-            {"kind": "grip", "label": "손가락 펴기", "value": 100},
-            {"kind": "wait", "label": "펴는 중", "seconds": 1.0},
-            {"kind": "align", "label": "병에 맞추기(위 카메라)", "J": np.round(J, 4).tolist(), "max_err_mm": 25, "apply": ALIGN_APPLY,
-             "cmd": [py, me, "measure", "--q", *[f"{x:.3f}" for x in sub[0]], "--vial", f"{g['vial'][0]:.2f}", f"{g['vial'][1]:.2f}",
-                     "--approach", f"{a_dir[0]:.4f}", f"{a_dir[1]:.4f}"]},
-            {"kind": "joints", "label": "마지막 접근", "q": R(a2), "dt": 0.05, "offset": "in", "ramp": 20},
+            {"kind": "joints", "label": "마지막 접근", "q": R(a2), "dt": 0.05},
+            *look(""),
+            {"kind": "align", "label": "병이 손가락 사이에 있는지(위 카메라)", "J": np.round(J, 4).tolist(),
+             "max_err_mm": 22, "apply": True, "cmd": meas},
+            {"kind": "joints", "label": "병 쪽으로 맞추기", "q": hold(20), "dt": 0.05, "offset": "in", "ramp": 20},
+            *look(" 다시"),
+            {"kind": "align", "label": "손가락 사이인지 다시 확인", "J": np.round(J, 4).tolist(),
+             "max_err_mm": 12, "apply": True, "cmd": [*meas, "--final"]},
+            {"kind": "joints", "label": "마지막 맞추기", "q": hold(14), "dt": 0.05, "offset": "in", "ramp": 14},
             {"kind": "grip", "label": "잡기", "value": GRIP_CLOSE},
             {"kind": "wait", "label": "잡는 중", "seconds": 1.5},
             # 2026-11-26: a run lifted an empty hand and poured air; the camera check after the lift passed because
@@ -581,6 +597,8 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     pours, skip, g, p = {}, set(), None, None
     for _ in range(6):
         g = plan_grasp(vial_xy, sc, api, obs, skip=skip)
+        if grasp_test:  # pick, lift, put back: no pour, so no pour or carry path to plan (2026-11-26: a grasp test
+            break       # failed on the carry path's -2.8 mm vial margin it never drives)
         if g["pitch"] not in pours:
             try:
                 pours[g["pitch"]] = plan_pour(cup_xy, sc, api, obs, pitch=g["pitch"])
@@ -596,14 +614,23 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     start = PARK if q_start is None else np.asarray(q_start, float)
     to_qa = thin(path_down_to(api, start, g["qa"], obs, back_dir=g["a_dir"]))
     lift_top = g["lift"][-1]
-    to_pour = thin(cu_plan(api, lift_top, p["q40"], obs))
-    from_pour = thin(cu_plan(api, p["q40"], lift_top, obs))
     to_park = thin(path_up_from(api, g["qa"], PARK, obs))
-    for nm, path in (("to the cup", to_pour), ("back from the cup", from_pour)):
-        vm = min(sc.vial_margin(q, False, p["up_f"]) for q in path)
-        gc = min(sc.grip_clear(q) for q in path)
-        if vm < 0 or gc < 0:
-            raise PlanError(f"carry path {nm}: vial margin {vm:.1f} mm, gripper clearance {gc:.1f} mm")
+    to_pour = from_pour = None
+    if not grasp_test:
+        # cuRobo's paths differ from call to call; a carry path that grazes a vial margin gets two more tries
+        for nm, a_, b_ in (("to the cup", lift_top, p["q40"]), ("back from the cup", p["q40"], lift_top)):
+            for attempt in range(3):
+                path = thin(cu_plan(api, a_, b_, obs))
+                vm = min(sc.vial_margin(q, False, p["up_f"]) for q in path)
+                gc = min(sc.grip_clear(q) for q in path)
+                if vm >= 0 and gc >= 0:
+                    break
+            else:
+                raise PlanError(f"carry path {nm}: vial margin {vm:.1f} mm, gripper clearance {gc:.1f} mm (3 tries)")
+            if nm == "to the cup":
+                to_pour = path
+            else:
+                from_pour = path
     t_plan = time.perf_counter() - t0
     # the gripper centres the vial on the pad when it closes; place so the vial lands back on its old spot
     qg, sub, lift = g["q"], g["sub"], g["lift"]
@@ -616,17 +643,18 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
         qplace, e = ik(qg, T)
         if e > 0.05:
             qplace = qg
-    tilt, TA = p["tilt"], p["tilt_angles"]
-    k15 = TA.index(TA[-1] - 15)
     pick, (a1, a2, up) = pick_segments(g, start, to_qa, name=name, target=target)
     approach = np.vstack([a1, a2])
-    carry = timed([([lift[-1]] + to_pour[1:], 45.0), (tilt, 30.0)])
-    pts = [tilt[-1], tilt[k15], tilt[-1], tilt[k15], tilt[-1]]
-    shake = np.vstack([timed([([x, y], 45.0)], acc=60.0)[(1 if i else 0):] for i, (x, y) in enumerate(zip(pts, pts[1:]))])
-    back = timed([([tilt[-1]] + tilt[::-1][1:] + [p["q40"]], 40.0), (from_pour[1:], 45.0), (lift[::-1][1:], 25.0),
-                  ([qplace], 8.0)])
     leave = timed([([qplace, sub[2]], 12.0), ([sub[1], sub[0], g["qa"]], 30.0), (to_park[1:], 65.0)])
-    seg = lambda label, Q: {"kind": "joints", "label": label, "q": np.round(Q, 3).tolist(), "dt": 0.05}
+    seg = lambda label, Q: {"kind": "joints", "label": label, "q": np.round(Q, 3).tolist(), "dt": 0.05}  # noqa: E731
+    if not grasp_test:
+        tilt, TA = p["tilt"], p["tilt_angles"]
+        k15 = TA.index(TA[-1] - 15)
+        carry = timed([([lift[-1]] + to_pour[1:], 45.0), (tilt, 30.0)])
+        pts = [tilt[-1], tilt[k15], tilt[-1], tilt[k15], tilt[-1]]
+        shake = np.vstack([timed([([x, y], 45.0)], acc=60.0)[(1 if i else 0):] for i, (x, y) in enumerate(zip(pts, pts[1:]))])
+        back = timed([([tilt[-1]] + tilt[::-1][1:] + [p["q40"]], 40.0), (from_pour[1:], 45.0), (lift[::-1][1:], 25.0),
+                      ([qplace], 8.0)])
     if grasp_test:  # approach, grip, lift to the top of the lift column, hold, put back, release, leave
         down = timed([([lift[-1]] + lift[::-1][1:], 25.0), ([qplace], 8.0)])
         phase = {"arm": "77", "label": f"{name} 잡기 시험", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [

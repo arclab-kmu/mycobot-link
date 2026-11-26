@@ -206,6 +206,17 @@ VIALS = {
 }
 
 
+def bias77():
+    """Radial shift (mm, away from the .77 base) added to a measured vial before planning its grasp, from
+    LAB/cal77_bias.json {"radial_mm": r}. 2026-11-26: three grasps closed just short of the vial along the
+    approach (the cap ended at the fingertips), i.e. the vial stood farther out than the camera map put it."""
+    p = locate.LAB / "cal77_bias.json"
+    try:
+        return float(json.loads(p.read_text()).get("radial_mm", 0.0)) if p.exists() else 0.0
+    except (ValueError, OSError):
+        return 0.0
+
+
 def pick_target(d, vial):
     """(target cap, other caps) from detect(): matcha = the green cap; coffee = the least green of the others."""
     caps = ([d["matcha"]] if d["matcha"] is not None else []) + list(d["others"])
@@ -271,6 +282,10 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
         raise plan77.PlanError("컵 테두리를 위 카메라에서 찾지 못했어요")
     cal = locate.cal77()
     vial77 = locate.to77(locate.at(m["u"], m["v"], locate.CAP_Z), cal)
+    rb = bias77()
+    if rb:
+        vial77 = vial77 + rb * vial77 / np.linalg.norm(vial77)
+        log(f"vial position shifted {rb:+.0f} mm outward (cal77_bias.json)")
     cup_w = locate.at(cup["u"], cup["v"], locate.RIM_Z)
     cup77 = locate.to77(cup_w, cal)
     others77 = [np.r_[locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z), cal), 262.5] for c in other_caps]
@@ -284,8 +299,8 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
                                     cup_xy=cup77, q_start=start77, name=name, target=vial)
         total = time.perf_counter() - t0
         log(f"move planned in {info['t_total_s']:.2f} s: {info}")
-        return {"trigger": "말차 병 옮기기", "title": "말차 병 옮기기 (시험)",
-                "say": f"말차 병을 ({vial77[0]:.0f}, {vial77[1]:.0f})에서 ({move_to[0]:.0f}, {move_to[1]:.0f}) mm로 옮깁니다. 계획 {total:.1f}초.",
+        return {"trigger": f"{name} 옮기기", "title": f"{name} 옮기기 (시험)",
+                "say": f"{name}을 ({vial77[0]:.0f}, {vial77[1]:.0f})에서 ({move_to[0]:.0f}, {move_to[1]:.0f}) mm로 옮깁니다. 계획 {total:.1f}초.",
                 "seen": "위 카메라로 병·컵 위치를 재고 경로는 cuRobo로 검사했습니다.", "phases": [ph]}
     moved, ph_mv = None, None
     try:
@@ -298,9 +313,9 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
         ph_mv, ph77, info77, moved = relocate(vial77, cup77, others77, start77, t0, name=name, target=vial)
     if only == "grasp":
         total = time.perf_counter() - t0
-        return {"trigger": "말차 병 잡기 시험", "title": "말차 병 잡고 들었다 놓기 (시험)",
-                "say": f"위 카메라로 말차 병을 찾고 {total:.1f}초 만에 계획했습니다. 잡고 들었다가 같은 자리에 놓습니다.",
-                "seen": f"말차 병 ({vial77[0]:.0f}, {vial77[1]:.0f}) mm (.77 기준)", "phases": [ph77],
+        return {"trigger": f"{name} 잡기 시험", "title": f"{name} 잡고 들었다 놓기 (시험)",
+                "say": f"위 카메라로 {name}을 찾고 {total:.1f}초 만에 계획했습니다. 잡고 들었다가 같은 자리에 놓습니다.",
+                "seen": f"{name} ({vial77[0]:.0f}, {vial77[1]:.0f}) mm (.77 기준)", "phases": [ph77],
                 "_plan": {"vial77": vial77.round(1).tolist(), "info77": {k: (float(v) if isinstance(v, (np.floating, float)) else v)
                                                                        for k, v in info77.items()}}}
     log(f".77 planned in {info77['t_total_s']:.2f} s: " + ", ".join(f"{k} {float(v):g}" if isinstance(v, (int, float, np.floating)) else f"{k} {v}"

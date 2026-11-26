@@ -184,13 +184,19 @@ def _centre_call(sc: dict[str, Any], spec: dict[str, Any], later: list[Segment],
 
 
 def _apply_offset(later: list[Segment], dq: np.ndarray) -> None:
-    """Add dq to the later joint segments by their offset mode: 'in' ramps in, 'full' adds, 'out' fades out."""
+    """Add dq to the later joint segments by their offset mode: 'in' ramps in, 'full' adds, 'out' fades out.
+    Only the first 'in' segment after the call ramps; later 'in' segments carry dq in full (the arm has already
+    moved by it), so two corrections in a row stack instead of the second one restarting from zero."""
+    ramped = False
     for seg in later:
         if seg.kind != "joints" or seg.q is None:
             continue
         mode, n_r = seg.meta.get("offset", "none"), max(1, seg.meta.get("ramp", 10))
         idx = np.arange(len(seg.q), dtype=float)
-        if mode == "in":
+        if mode == "in" and ramped:
+            w = np.ones(len(seg.q))
+        elif mode == "in":
+            ramped = True
             w = _smooth(idx / n_r)
         elif mode == "full":
             w = np.ones(len(seg.q))
