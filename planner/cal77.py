@@ -6,6 +6,10 @@ snap   : save one top photo (called by the scenario while the arm holds).
 fit    : centroid of the changed pixels in each open/closed pair <-> FK of a point in the flange frame;
          fits the camera pose in the .77 base frame (6) and that flange point (3) by Gauss-Newton on pixels.
          Writes $MYCOBOT_LAB/cal77_cam.json (not used by locate.py: the 2026-11-25 fit was rejected).
+fit2d  : the map locate.py does use: camera world -> .77 as a 2-D rotation + translation ($MYCOBOT_LAB/cal77.json),
+         from the same photos. The finger centre's offset in the hand (along / across the fingers) is fitted with it:
+         it turns with the hand from spot to spot, the map does not. For a new room (2026-11-26 the exhibit setup moved
+         off the lab LAN), before any grasp. --dry-run prints without writing.
 """
 from __future__ import annotations
 
@@ -112,7 +116,7 @@ def cmd_plan(args):
                      {"kind": "wait", "label": "멈춤", "seconds": 0.6},
                      {"kind": "check", "label": "사진(닫힘)", "cmd": [py, me, "snap", f"{i:02d}_closed"]}]
     segs.append({"kind": "grip", "label": "열기", "value": 100})
-    segs.append({"kind": "check", "label": "보정 계산", "cmd": [py, me, "fit"], "timeout_s": 60})
+    segs.append({"kind": "check", "label": "보정 계산(2-D 지도)", "cmd": [py, me, "fit2d"], "timeout_s": 60})
     meta = [{"i": i + 1, "xy": [s[0], s[1]], "z_pad": s[2], "q": np.round(s[3], 3).tolist()} for i, s in enumerate(spots)]
     SNAPS.mkdir(parents=True, exist_ok=True)
     for f in SNAPS.glob("*.jpg"):
@@ -142,7 +146,7 @@ def cmd_snap(args):
     sys.exit(1)
 
 
-def _centroids():
+def _centroids(win_px=120.0, min_n=30):
     from PIL import Image
     meta = json.loads((SNAPS / "spots.json").read_text())
     Rc, tc = _initial_cam()
@@ -157,9 +161,9 @@ def _centroids():
         T = kin.fk(np.array(m["q"]))
         guess = project(Rc, tc, T[:3, :3] @ plan77.TLV + T[:3, 3])[0]
         vv, uu = np.mgrid[0:d.shape[0], 0:d.shape[1]]
-        win = np.hypot(uu - guess[0], vv - guess[1]) < 120
+        win = np.hypot(uu - guess[0], vv - guess[1]) < win_px
         mask = (d > 35) & win
-        if mask.sum() < 30:
+        if mask.sum() < min_n:
             continue
         w = d[mask]
         u, v = float((uu[mask] * w).sum() / w.sum()), float((vv[mask] * w).sum() / w.sum())
@@ -230,6 +234,65 @@ def cmd_fit(args):
     print(f"보정 완료: {len(obs)}곳, 재투영 rms {rms:.2f} px, 이전 지도와 차이 평균 {shift.mean():.1f} mm (최대 {shift.max():.1f})")
 
 
+def cmd_fit2d(args):
+    import align  # noqa: E402 - FINGER_POINT: flange-frame centre of the open/close difference (fit 2026-11-25)
+    obs = [o for o in _centroids(win_px=args.win, min_n=800)]
+    if len(obs) < 6:
+        print(f"보정 실패: 쓸 만한 열림/닫힘 차이가 {len(obs)}곳뿐이에요")
+        sys.exit(1)
+    rows, rhs, info = [], [], []
+    for o in obs:
+        T = kin.fk(np.array(o["q"]))
+        p = T[:3, :3] @ align.FINGER_POINT + T[:3, 3]
+        f = (T[:3, :3] @ align.FINGER_POINT)[:2]
+        f = f / np.linalg.norm(f)  # along the fingers (horizontal)
+        l = np.array([-f[1], f[0]])
+        w = locate.at(o["px"][0], o["px"][1], p[2])[:2]  # camera world at the finger point's height
+        # unknowns c, s, tx, ty, oa, ol:  [c -s; s c] w + t = p + oa f + ol l
+        rows += [[w[0], -w[1], 1, 0, -f[0], -l[0]], [w[1], w[0], 0, 1, -f[1], -l[1]]]
+        rhs += [p[0], p[1]]
+        info.append((o["i"], w, p[:2], f, l))
+    A, b = np.array(rows, float), np.array(rhs, float)
+    prior = np.zeros((2, 6))
+    prior[0, 4] = prior[1, 5] = 1.0 / 10.0  # finger-centre offset ~ +-10 mm
+    x = np.linalg.lstsq(np.vstack([A, prior]), np.r_[b, 0, 0], rcond=None)[0]
+    scale = float(np.hypot(x[0], x[1]))
+    th = math.atan2(x[1], x[0])
+    c, s_ = math.cos(th), math.sin(th)
+    R2 = np.array([[c, -s_], [s_, c]])
+    # translation and offset again with a pure rotation (locate.from77 inverts R2 by transposing)
+    A2 = np.array([[1, 0, -it[3][0], -it[4][0]] for it in info] + [[0, 1, -it[3][1], -it[4][1]] for it in info], float)
+    b2 = np.r_[[it[2][0] - (R2 @ it[1])[0] for it in info], [it[2][1] - (R2 @ it[1])[1] for it in info]]
+    y = np.linalg.lstsq(np.vstack([A2, [[0, 0, 0.1, 0], [0, 0, 0, 0.1]]]), np.r_[b2, 0, 0], rcond=None)[0]
+    t2, oa, ol = y[:2], float(y[2]), float(y[3])
+    res = np.array([R2 @ it[1] + t2 - (it[2] + oa * it[3] + ol * it[4]) for it in info])
+    rms = float(np.sqrt((res ** 2).sum(1).mean()))
+    probe = [(u, v) for u in (220, 300, 380, 460) for v in (100, 180, 260)]
+    old = np.array([locate.to77(locate.at(u, v, 264.0)) for u, v in probe])
+    new = np.array([R2 @ locate.at(u, v, 264.0)[:2] + t2 for u, v in probe])
+    shift = np.linalg.norm(new - old, axis=1)
+    out = {"yaw_deg": round(math.degrees(th), 4), "R2": R2.round(8).tolist(), "T": t2.round(3).tolist(),
+           "finger_offset_mm": [round(oa, 1), round(ol, 1)], "scale_free_fit": round(scale, 4), "rms_mm": round(rms, 2),
+           "n": len(info), "time": time.strftime("%Y-%m-%d %H:%M"),
+           "residuals_mm": {str(it[0]): np.round(r_, 1).tolist() for it, r_ in zip(info, res)},
+           "_src": "cal77.py fit2d: empty-hand hovers, open/close difference centroids"}
+    msg = (f"2-D 지도: {len(info)}곳, 잔차 rms {rms:.1f} mm, 회전 {math.degrees(th):+.2f}° (이전 "
+           f"{locate.cal77().get('yaw_deg', float('nan')):+.2f}°), 이전 지도와 차이 평균 {shift.mean():.1f} mm (최대 {shift.max():.1f}), "
+           f"손가락 중심 오프셋 앞 {oa:+.1f} / 옆 {ol:+.1f} mm, 축척 {scale:.3f}")
+    if abs(scale - 1.0) > 0.03:
+        msg += " (축척이 3% 넘게 달라요: 카메라 높이가 바뀌었을 수 있어요)"
+    if rms > 10.0 or len(info) < 8:  # 2026-11-25 old-room photos: 12 spots, 5.9 mm, map within 5.5 mm of the old one
+        print(msg + ": 잔차가 크거나 자리가 적어 지도를 바꾸지 않아요")
+        sys.exit(1)
+    if not args.dry_run:
+        p = locate.LAB / "cal77.json"
+        if p.exists():
+            p.rename(p.with_name(f"cal77.before-{time.strftime('%Y%m%d-%H%M')}.json"))
+        p.write_text(json.dumps(out, indent=1))
+        msg += f" -> {p}"
+    print(msg)
+
+
 def ray77(cal, u, v, z):
     """Pixel (u, v) -> point at height z in the .77 frame, with a camera pose given in the .77 frame."""
     K = locate.CAM.K
@@ -247,5 +310,8 @@ if __name__ == "__main__":
     p = sp.add_parser("snap")
     p.add_argument("name")
     sp.add_parser("fit")
+    p = sp.add_parser("fit2d")
+    p.add_argument("--win", type=float, default=220.0, help="search radius (px) around the old map's guess")
+    p.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
-    {"plan": cmd_plan, "snap": cmd_snap, "fit": cmd_fit}[a.cmd](a)
+    {"plan": cmd_plan, "snap": cmd_snap, "fit": cmd_fit, "fit2d": cmd_fit2d}[a.cmd](a)
