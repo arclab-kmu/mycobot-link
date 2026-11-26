@@ -232,7 +232,10 @@ def _align_call(spec: dict[str, Any], later: list[Segment], say: Callable[[str],
             return {"err_mm": err.tolist(), "dq_deg": [0.0] * J.shape[0]}
         if n > max_err:
             raise RuntimeError(f"align: offset {n:.1f} mm is over {max_err:.0f} mm; stopping here")
-        dq = -J @ err if n > dead else np.zeros(J.shape[0])
+        if "dq_deg" in out:  # the measuring script solved the joint change itself (exact IK, not -J err)
+            dq = np.array(out["dq_deg"], float) if n > dead else np.zeros(J.shape[0])
+        else:
+            dq = -J @ err if n > dead else np.zeros(J.shape[0])
         say(f"align: {out.get('msg', '')} -> shift " + ", ".join(f"{x:+.1f}" for x in dq) + " deg")
         _apply_offset(later, dq)
         return {"err_mm": err.tolist(), "dq_deg": dq.tolist()}

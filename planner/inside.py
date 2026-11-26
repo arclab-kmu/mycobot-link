@@ -85,6 +85,17 @@ def measure(q, vial, approach, final=False):
            "err_mm": (-dv).round(2).tolist(),
            "msg": f"병이 패드 중심에서 옆으로 {lat_mm:+.1f} mm, 앞으로 {along_mm:+.1f} mm"
                   + (" (손가락 사이)" if inside else " (손가락 밖)")}
+    # The joint change for this hand shift, by IK from where the arm is now (the console's -J err is linear and
+    # was ~2x off next to the base, 2026-11-26: a 15 mm sideways fix moved the hand ~27 mm).
+    import matcha_dyn  # noqa: E402 - arm_q() reads the console
+    q_now = matcha_dyn.arm_q("77")
+    q_now = np.asarray(q, float) if q_now is None else np.asarray(q_now, float)
+    Tn = kin.fk(q_now)
+    Tt = Tn.copy()
+    Tt[:2, 3] += dv
+    q_t, e_ik = plan77.ik(q_now, Tt)
+    if e_ik < 0.3:
+        out["dq_deg"] = np.round(q_t - q_now, 3).tolist()
     if np.hypot(*dv) > MAX_STEP:
         out["msg"] += f": 보정 {np.hypot(*dv):.0f} mm는 너무 커서 측정이 틀린 것으로 봅니다"
         return out, 1
