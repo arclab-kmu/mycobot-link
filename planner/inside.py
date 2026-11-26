@@ -36,10 +36,14 @@ import plan77  # noqa: E402
 
 PAD_BACK = 10.0  # mm from the fingertips back to the pad centre (pads ~20 mm long)
 LAT_OK, ALONG_LO, ALONG_HI = 6.0, -6.0, 8.0  # cap offset from the pad centre that the fingers still wrap
-MAX_STEP = 20.0  # a measured correction above this is treated as a bad measurement
+# Larger readings are treated as bad measurements. Sideways up to 40 mm: on 2026-11-26 (vial at r 198) the vial stood
+# in front of the right finger, 29 mm off the midline (photo-confirmed), and the old 20 mm cap on the whole step stopped
+# a run that a sideways move would have fixed.
+MAX_LAT, MAX_ALONG = 40.0, 20.0
+VIAL_R_MM = 15.0  # vial radius (~11) + margin: changed pixels this close to the vial's axis are the vial, not a finger
 
 
-def measure(q, vial, approach, final=False):
+def measure(q, vial, approach, final=False, lateral_only=False):
     from PIL import Image
     a = np.asarray(Image.open(align.DIR / "g_open.jpg").convert("RGB")).astype(float)
     b = np.asarray(Image.open(align.DIR / "g_half.jpg").convert("RGB")).astype(float)
@@ -56,6 +60,30 @@ def measure(q, vial, approach, final=False):
     ax = ax / np.linalg.norm(ax)
     lat = np.array([-ax[1], ax[0]])
     pts = np.array([locate.to77(locate.at(float(u), float(v), pad[2])) for u, v in zip(uu[mask][::3], vv[mask][::3])])
+    # The cap first (it does not depend on the finger pixels): the round candidate nearest its planned pixel that is
+    # also found in the second photo (a pad, which moves, is not). 2026-11-26: a changed-pixel filter dropped the right
+    # cap (the closing pad sweeps next to it); a 6.5 px same-spot test dropped it too once the photo close (then 60)
+    # nudged an off-centre vial by ~6 mm.
+    cb = detect.find_caps(b, None, n=40, gray_min=100.0, wood_min=0.0)
+    near = sorted((c for c in detect.find_caps(a, None, n=40, gray_min=100.0, wood_min=0.0)
+                   if np.hypot(c["u"] - pred_cap[0], c["v"] - pred_cap[1]) < 45),
+                  key=lambda c_: np.hypot(c_["u"] - pred_cap[0], c_["v"] - pred_cap[1]))
+    caps = [c for c in near if any(np.hypot(c["u"] - k["u"], c["v"] - k["v"]) < 10.0 for k in cb)]
+    if not caps:
+        return {"msg": "예상 위치 근처에서 병뚜껑을 찾지 못했어요"}, 1
+    c = caps[0]
+    cap_w = locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z))
+    # Changed pixels on the vial itself are not fingers: a finger moving in front of it changes them, and on
+    # 2026-11-26 they stretched the "fingertips" ~20 mm forward (along read -15 mm with the vial ahead of the tips).
+    # Drop pixels whose ray passes the vial's axis (cap down to the table) closer than VIAL_R_MM.
+    us, vs = uu[mask][::3].astype(float), vv[mask][::3].astype(float)
+    keep = np.ones(len(pts), bool)
+    for zz in np.linspace(plan77.TABLE, locate.CAP_Z, 6):
+        on = np.array([locate.to77(locate.at(u, v, zz)) for u, v in zip(us, vs)])
+        keep &= np.hypot(*(on - cap_w).T) > VIAL_R_MM
+    pts = pts[keep]
+    if len(pts) < 40:
+        return {"msg": f"병을 뺀 손가락 픽셀이 너무 적어요 ({len(pts)} 점)"}, 1
     rel = pts - pad[:2]
     s_a, s_c = rel @ ax, rel @ lat
     mid = float(np.median(s_c))
@@ -65,22 +93,15 @@ def measure(q, vial, approach, final=False):
             return {"msg": f"손가락 두 개를 나누지 못했어요 ({len(left)} / {len(right)} 점)"}, 1
         mid = float((np.median(left) + np.median(right)) / 2)
     tips = float(np.percentile(s_a, 95))
-    # The cap: the round candidate nearest its planned pixel that is also found in the second photo (a pad, which
-    # moves, is not). 2026-11-26: a changed-pixel filter dropped the right cap (the closing pad sweeps next to it);
-    # a 6.5 px same-spot test dropped it too once the photo close (then 60) nudged an off-centre vial by ~6 mm.
-    cb = detect.find_caps(b, None, n=40, gray_min=100.0, wood_min=0.0)
-    near = sorted((c for c in detect.find_caps(a, None, n=40, gray_min=100.0, wood_min=0.0)
-                   if np.hypot(c["u"] - pred_cap[0], c["v"] - pred_cap[1]) < 45),
-                  key=lambda c_: np.hypot(c_["u"] - pred_cap[0], c_["v"] - pred_cap[1]))
-    caps = [c for c in near if any(np.hypot(c["u"] - k["u"], c["v"] - k["v"]) < 10.0 for k in cb)]
-    if not caps:
-        return {"msg": "예상 위치 근처에서 병뚜껑을 찾지 못했어요"}, 1
-    c = caps[0]
-    cap = locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z)) - pad[:2]
+    cap = cap_w - pad[:2]
     lat_mm = float(cap @ lat - mid)
     along_mm = float(cap @ ax - (tips - PAD_BACK))
     inside = abs(lat_mm) <= LAT_OK and ALONG_LO <= along_mm <= ALONG_HI
-    dv = lat_mm * lat + along_mm * ax
+    # Sideways only while the vial is not between the fingers: forward, a finger would meet the vial; back, a pad that
+    # stands just ahead of the vial (2026-11-26: vial under the right finger's linkage, along -17 mm) would pull into
+    # it. Sideways the finger slides past. The next look measures along with the vial between the fingers.
+    step_along = along_mm if abs(lat_mm) <= LAT_OK and not lateral_only else 0.0
+    dv = lat_mm * lat + step_along * ax
     out = {"lat_mm": round(lat_mm, 1), "along_mm": round(along_mm, 1), "inside": bool(inside),
            "err_mm": (-dv).round(2).tolist(),
            "msg": f"병이 패드 중심에서 옆으로 {lat_mm:+.1f} mm, 앞으로 {along_mm:+.1f} mm"
@@ -96,8 +117,15 @@ def measure(q, vial, approach, final=False):
     q_t, e_ik = plan77.ik(q_now, Tt)
     if e_ik < 0.3:
         out["dq_deg"] = np.round(q_t - q_now, 3).tolist()
-    if np.hypot(*dv) > MAX_STEP:
-        out["msg"] += f": 보정 {np.hypot(*dv):.0f} mm는 너무 커서 측정이 틀린 것으로 봅니다"
+    if lateral_only:
+        # before the last approach (fingertips ~20 mm behind the vial): only the sideways error is used; the along
+        # reading here is the remaining approach, not an error
+        out = {"lat_mm": round(lat_mm, 1), "along_mm": round(along_mm, 1), "inside": False, "err_mm": (-dv).round(2).tolist(),
+               "msg": f"접근 전: 병이 손가락 가운데에서 옆으로 {lat_mm:+.1f} mm, 옆으로 맞추고 들어갑니다"}
+    elif step_along != along_mm:
+        out["msg"] += ": 옆으로만 먼저 맞춥니다"
+    if abs(lat_mm) > MAX_LAT or abs(step_along) > MAX_ALONG:
+        out["msg"] += f": 보정 (옆 {lat_mm:+.0f}, 앞 {step_along:+.0f}) mm는 너무 커서 측정이 틀린 것으로 봅니다"
         return out, 1
     if final and not inside:
         out["msg"] += ": 잡지 않고 멈춥니다"
@@ -115,6 +143,7 @@ if __name__ == "__main__":
     p.add_argument("--vial", nargs=2, type=float, required=True)
     p.add_argument("--approach", nargs=2, type=float, required=True)
     p.add_argument("--final", action="store_true")
+    p.add_argument("--lateral-only", action="store_true")
     a = ap.parse_args()
     if a.cmd == "snap":
         align.snap(a.name)
@@ -126,7 +155,7 @@ if __name__ == "__main__":
             except Exception:  # noqa: BLE001 - the side view is extra evidence, not required
                 pass
     else:
-        out, code = measure(a.q, a.vial, a.approach, a.final)
+        out, code = measure(a.q, a.vial, a.approach, a.final, a.lateral_only)
         (align.DIR / "inside_last.json").write_text(json.dumps(out, ensure_ascii=False))
         print(json.dumps(out, ensure_ascii=False))
         sys.exit(code)

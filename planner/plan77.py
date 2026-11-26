@@ -558,6 +558,13 @@ def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha
     meas = [py, ins, "measure", "--q", *[f"{x:.3f}" for x in qg], "--vial", f"{g['vial'][0]:.2f}", f"{g['vial'][1]:.2f}",
             "--approach", f"{a_dir[0]:.4f}", f"{a_dir[1]:.4f}"]
     hold = lambda n: R(np.repeat(np.asarray(qg, float)[None], n, axis=0))  # noqa: E731 - stand still; a shift moves it
+    # A look before the last approach, where the fingertips are still ~20 mm behind the vial: 2026-11-26 (vial at
+    # r 198-225) the hand stood ~29 mm to the side of the vial and the last approach knocked it over before the look
+    # at the grasp pose. Only the sideways error is used there; the hand moves sideways in place, then goes in.
+    q_pre = np.asarray(a1[-1], float)
+    meas_pre = [py, ins, "measure", "--q", *[f"{x:.3f}" for x in q_pre], "--vial", f"{g['vial'][0]:.2f}", f"{g['vial'][1]:.2f}",
+                "--approach", f"{a_dir[0]:.4f}", f"{a_dir[1]:.4f}", "--lateral-only"]
+    J_pre = grasp_jac(q_pre)
 
     def look(tag):  # open / slightly closed photo pair at the grasp pose. 75, not 60: at 60 a pad touched and
         # nudged a vial sitting 10 mm off-centre (2026-11-26); the pads still move enough to be seen.
@@ -576,17 +583,22 @@ def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha
     segs = [{"kind": "grip", "label": "그리퍼 열기", "value": 100},
             {"kind": "wait", "label": "여는 중", "seconds": 1.0},
             {"kind": "joints", "label": label, "q": R(a1), "dt": 0.05},
-            {"kind": "joints", "label": "마지막 접근", "q": R(a2), "dt": 0.05},
+            *look(" 접근 전"),
+            {"kind": "align", "label": "접근 전 옆 오차(위 카메라)", "J": np.round(J_pre, 4).tolist(),
+             "max_err_mm": 42, "apply": True, "cmd": meas_pre},
+            {"kind": "joints", "label": "옆으로 맞추기", "q": R(np.repeat(q_pre[None], 20, axis=0)), "dt": 0.05,
+             "offset": "in", "ramp": 20},
+            {"kind": "joints", "label": "마지막 접근", "q": R(a2), "dt": 0.05, "offset": "in"},
             *look(""),
             {"kind": "align", "label": "병이 손가락 사이에 있는지(위 카메라)", "J": np.round(J, 4).tolist(),
-             "max_err_mm": 22, "apply": True, "cmd": meas},
+             "max_err_mm": 42, "apply": True, "cmd": meas},
             {"kind": "joints", "label": "병 쪽으로 맞추기", "q": hold(20), "dt": 0.05, "offset": "in", "ramp": 20},
             # A second correction before the final look: with the vial off to one side the fingertip estimate is
             # poor; once it sits between the fingers the along-the-fingers reading is right (side camera,
             # 2026-11-26: pass 1 read +4 mm along, pass 2 +12.5 mm, and the side view showed the tips ~12 mm short).
             *look(" 다시"),
             {"kind": "align", "label": "다시 재고 맞추기", "J": np.round(J, 4).tolist(),
-             "max_err_mm": 22, "apply": True, "cmd": meas},
+             "max_err_mm": 42, "apply": True, "cmd": meas},
             {"kind": "joints", "label": "병 쪽으로 더 맞추기", "q": hold(16), "dt": 0.05, "offset": "in", "ramp": 16},
             *look(" 마지막"),
             {"kind": "align", "label": "손가락 사이인지 마지막 확인", "J": np.round(J, 4).tolist(),
