@@ -19,7 +19,10 @@ import json
 import logging
 import threading
 import time
+import select
+import socket
 import traceback
+import urllib.parse
 import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -781,6 +784,8 @@ def make_handler(console: Console):
                 self.wfile.write(body)
             elif path == "/api/state":
                 self._json(console.state())
+            elif path == "/curobo" or path.startswith("/curobo/"):
+                self._proxy_curobo()
             elif path.startswith("/cam/"):
                 parts = path.split("/")  # ['', 'cam', name, 'color.mjpg']
                 if len(parts) != 4:
@@ -801,6 +806,53 @@ def make_handler(console: Console):
                     self._mjpeg(feed)
             else:
                 self._json({"error": "not found"}, 404)
+
+        def _proxy_curobo(self) -> None:
+            """The cuRobo viewer (viser) under /curobo/ on this port, plain GETs and its WebSocket. A viewer that only
+            forwards the console's port (the Claude app's web view on another computer, an ssh -L of 8095) then
+            still shows the robot: an iframe at http://127.0.0.1:8080 points at the viewing computer instead."""
+            up = urllib.parse.urlparse(console.ws.curobo_view or "http://127.0.0.1:8080")
+            host, port = up.hostname or "127.0.0.1", up.port or 80
+            sub = self.path[len("/curobo"):] or "/"
+            if not sub.startswith("/"):
+                sub = "/" + sub
+            if self.headers.get("Upgrade", "").lower() != "websocket":
+                try:
+                    with urllib.request.urlopen(f"http://{host}:{port}{sub}", timeout=10) as r:
+                        body, ctype = r.read(), r.headers.get("Content-Type", "application/octet-stream")
+                except Exception as exc:  # noqa: BLE001 - the viewer is optional
+                    return self._json({"error": f"cuRobo viewer: {exc}"}, 502)
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            # WebSocket: replay the upgrade request upstream, then pipe raw bytes both ways until one side closes
+            try:
+                s = socket.create_connection((host, port), timeout=5)
+            except OSError as exc:
+                return self._json({"error": f"cuRobo viewer: {exc}"}, 502)
+            head = [f"GET {sub} HTTP/1.1"] + [f"{k}: {f'{host}:{port}' if k.lower() == 'host' else v}"
+                                              for k, v in self.headers.items()]
+            s.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
+            self.close_connection = True
+            c = self.connection
+            s.settimeout(None)
+            c.settimeout(None)
+            try:
+                while True:
+                    ready, _, _ = select.select([c, s], [], [], 60.0)
+                    for src in ready:
+                        data = src.recv(65536)
+                        if not data:
+                            return
+                        (s if src is c else c).sendall(data)
+            except OSError:
+                return
+            finally:
+                s.close()
 
         def _mjpeg(self, feed: Feed) -> None:
             self.send_response(200)
@@ -828,7 +880,10 @@ def make_handler(console: Console):
             except json.JSONDecodeError:
                 return self._json({"ok": False, "error": "bad json"}, 400)
             if self.path == "/api/command":
-                self._json(console.command(body))
+                r = console.command(body)
+                if not r.get("ok"):  # visible in the page's log too, not only as the sender's error
+                    console.say(f"명령 거부: {r.get('error')} ('{str(body.get('text', ''))[:40]}')")
+                self._json(r)
             elif self.path == "/api/stop":
                 self._json(console.stop())
             else:

@@ -43,6 +43,7 @@
   button { font: inherit; font-weight: 600; border-radius: 10px; padding: 8px 16px; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   button.go { background: var(--accent-deep); border-color: var(--accent-deep); color: #fff; }
   button.go:disabled { opacity: 0.45; cursor: default; }
+  .cmdmsg { margin-top: 8px; font-size: 13px; color: var(--accent, #0a8a8a); min-height: 1em; }
   button.stop { border-color: var(--text); background: var(--text); color: #fff; margin-left: auto; }
   .say { font-size: 15px; margin: 0 0 6px; }
   .seen { color: var(--muted); margin: 0 0 10px; }
@@ -97,6 +98,7 @@
         <button class="go" id="go">보내기</button>
         <button class="stop" id="stop">정지</button>
       </div>
+      <div id="cmdmsg" class="cmdmsg"></div>
     </section>
     <section>
       <h2>Plan</h2>
@@ -133,19 +135,26 @@ for (const cam of CFG.cameras) {
   }
 }
 for (const a of CFG.arms) $("arm").insertAdjacentHTML("beforeend", `<option value="${a.name}">${esc(a.label)}</option>`);
-$("curoboview").src = CFG.curobo_view;
+// through this console's own port (/curobo/ is proxied to the viewer), so a web view that forwards only this port works
+$("curoboview").src = "/curobo/";
 $("speed").oninput = () => { $("speedv").textContent = $("speed").value; };
 
 async function post(path, body) {
-  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
-  return r.json();
+  try {
+    const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+    const t = await r.text();
+    try { return JSON.parse(t); } catch (e) { return {ok: false, error: `HTTP ${r.status}: ${t.slice(0, 120)}`}; }
+  } catch (e) {
+    return {ok: false, error: `보내지 못했어요: ${e}`};
+  }
 }
+function cmdmsg(m) { $("cmdmsg").textContent = m || ""; }
 $("go").onclick = async () => {
   const text = $("text").value.trim();
   if (!text) return;
   const r = await post("/api/command", {text, arm: $("arm").value, execute: $("execute").checked,
     loop: $("loop").checked, curobo: $("curobo").checked, speed_dps: +$("speed").value});
-  if (!r.ok) alert(r.error);
+  cmdmsg(r.ok ? "" : r.error);  // alert() is swallowed by some embedded web views
 };
 $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("go").click(); });
 $("stop").onclick = () => post("/api/stop");
