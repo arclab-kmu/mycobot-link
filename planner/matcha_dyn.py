@@ -298,7 +298,11 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
     t_meas = time.perf_counter() - t0
     cup = d["cup"]
     m, other_caps = pick_target(d, vial)
-    if cup["n_edge"] < 40:
+    # A grasp test or a move does not use the cup. In the 2026-11-26 exhibit room the cup stood outside the colour
+    # view, and a colour "cup" found elsewhere would wrongly clear the depth boxes around it; the real cup is a depth
+    # box like everything else there.
+    no_cup = only == "grasp" or move_to is not None
+    if not no_cup and (cup is None or cup["n_edge"] < 40):
         raise plan77.PlanError("컵 테두리를 위 카메라에서 찾지 못했어요")
     cal = locate.cal77()
     vial77 = locate.to77(locate.at(m["u"], m["v"], locate.CAP_Z), cal)
@@ -306,8 +310,12 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
     if rb:
         vial77 = vial77 + rb * vial77 / np.linalg.norm(vial77)
         log(f"vial position shifted {rb:+.0f} mm outward (cal77_bias.json)")
-    cup_w = locate.at(cup["u"], cup["v"], locate.RIM_Z)
-    cup77 = locate.to77(cup_w, cal)
+    if no_cup:
+        cup77 = np.array([2000.0, 2000.0])  # far away: no cup walls, no depth hole
+        cup_w = locate.from77(cup77, cal)
+    else:
+        cup_w = locate.at(cup["u"], cup["v"], locate.RIM_Z)
+        cup77 = locate.to77(cup_w, cal)
     others77 = [np.r_[locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z), cal), 262.5] for c in other_caps]
     log(f"measured in {t_meas:.2f} s: {vial} vial .77 ({vial77[0]:.1f}, {vial77[1]:.1f}), cup .77 ({cup77[0]:.1f}, {cup77[1]:.1f}),"
         f" other vials {[tuple(float(x) for x in np.round(o[:2], 1)) for o in others77]}")

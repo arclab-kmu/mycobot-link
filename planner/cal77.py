@@ -86,8 +86,10 @@ def cmd_plan(args):
         caps = ([d["matcha"]] if d["matcha"] else []) + d["others"]
         others = [locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z)).tolist() for c in caps]
     scene = plan77.Scene(cup, 286.0 + 25.0, 40.0 + 25.0, [[o[0], o[1], 262.5 + 25.0] for o in others])
-    obs = (ws.obstacles_for(ws.arms["77"]) + plan77.cup_boxes(cup, 286.0 + 25.0, 40.0 + 25.0) +
-           [plan77.box(f"vial{i}", o[0], o[1], 197.0, 300.0, 80, 80) for i, o in enumerate(others)])[:15]
+    obs = ws.obstacles_for(ws.arms["77"])
+    if not args.clear:
+        obs = (obs + plan77.cup_boxes(cup, 286.0 + 25.0, 40.0 + 25.0) +
+               [plan77.box(f"vial{i}", o[0], o[1], 197.0, 300.0, 80, 80) for i, o in enumerate(others)])[:plan77.MAX_OBS]
     if args.keepout:
         # Objects stay on the table but the map that would place them is what this run measures (2026-11-26 night,
         # Hojin: "지금 상태에서 진행해 봐 ... 병 넘어트리지마"). Distances from the .77 axis do not depend on the
@@ -95,11 +97,19 @@ def cmd_plan(args):
         # arm is kept above table + H everywhere beyond an octagon of apothem R around its axis (4 boxes); inside it
         # (where the upper arm rises past the table edge) it may go lower.
         r_in, h = args.keepout
-        obs = obs[:11]
         for k, ang in enumerate((0, 45, 90, -45)):
             a = math.radians(ang)
             c = r_in + 350.0
             obs.append(plan77.box(f"keepout{k}", c * math.cos(a), c * math.sin(a), plan77.TABLE, plan77.TABLE + h,
+                                  700.0, 1400.0, ang))
+    if args.fence:
+        # tall fixtures (camera gooseneck 180 mm, tripod ~140 mm above the table) stood >= 270 mm from the .77 axis
+        # (AGX depth, 2026-11-26): a fence of the same octagon shape beyond R, up to table + H, all around
+        r_f, h_f = args.fence
+        for k, ang in enumerate((0, 45, 90, 135, 180, -135, -90, -45)):
+            a = math.radians(ang)
+            c = r_f + 350.0
+            obs.append(plan77.box(f"fence{k}", c * math.cos(a), c * math.sin(a), plan77.TABLE - 30.0, plan77.TABLE + h_f,
                                   700.0, 1400.0, ang))
     spots = []
     grid = [(x, y) for y in range(-220, 61, 40) for x in (range(100, 241, 35) if (y // 40) % 2 else range(240, 99, -35))]
@@ -390,6 +400,8 @@ if __name__ == "__main__":
     p.add_argument("--end-here", action="store_true", help="return to the start pose instead of PARK")
     p.add_argument("--keepout", type=float, nargs=2, metavar=("R_MM", "H_MM"),
                    help="objects left in place: keep the arm above table + H beyond R mm from the .77 axis")
+    p.add_argument("--fence", type=float, nargs=2, metavar=("R_MM", "H_MM"),
+                   help="keep the arm inside R mm of the .77 axis below table + H (tall fixtures farther out)")
     p.add_argument("--polar", type=float, nargs="+", metavar="R", help="hover radii (mm), with --bearings")
     p.add_argument("--bearings", type=float, nargs=3, default=[-20.0, 70.0, 15.0], metavar=("FROM", "TO", "STEP"))
     p.add_argument("--max-spots", type=int, default=14)
