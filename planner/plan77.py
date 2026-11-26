@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
+import ik_cuda
 import kin
 
 HERE = Path(__file__).resolve().parent
@@ -106,6 +107,44 @@ def ik_walk(q0, Tg, step_mm=12.0):
         Tk[:3, :3] = _axis_angle(axis, f * ang) @ T0[:3, :3]
         q, e = ik(q, Tk)
     return q, e
+
+
+def _chains(targets, step_fb=12.0, fb_from_prev=False):
+    """Solve candidate IK chains, yielding (chain or None, error) per candidate in order.
+
+    ``targets`` = per candidate, a list of (seed q, target T) along its chain. The first pose is reached by
+    ik_walk from its seed, each later pose by ik from the previous solution; a pose over 0.3 gets one fallback
+    ik_walk (step ``step_fb``, from the previous solution when ``fb_from_prev``, else from its seed) and ends the
+    chain if it still fails. With planner/cuda/libikchain.so (built on the AGX Orin) all candidates are solved in
+    one GPU launch, ~30-75x faster than this numpy loop there; without it the loop stays lazy, so a search that
+    stops at its first good candidate solves only what it needs."""
+    def one(tl):
+        chain, prev = [], None
+        for seed, T in tl:
+            qn, e = ik_walk(seed, T) if prev is None else ik(prev, T)
+            if e > 0.3:
+                qn, e = ik_walk(prev if (fb_from_prev and prev is not None) else seed, T, step_mm=step_fb)
+            if e > 0.3:
+                return None, e
+            chain.append(qn)
+            prev = qn
+        return chain, 0.0
+
+    # On the AGX one GPU thread walks a chain ~3x slower than numpy does (FP64, one thread), but all candidates run
+    # at once. So the first LAZY candidates (usually the answer) go through numpy, and only if the caller asks for
+    # more does the rest go to the GPU in one launch (2026-11-26, AGX: easy search 0.25 s, hard one 16 s -> ~1 s).
+    lazy = 2 if ik_cuda.available() else len(targets)
+    for tl in targets[:lazy]:
+        yield one(tl)
+    rest = targets[lazy:]
+    if not rest:
+        return
+    S = np.array([[s for s, _ in tl] for tl in rest], float)
+    T = np.array([[g for _, g in tl] for tl in rest], float)
+    q, e, bad = ik_cuda.chain(T, S, 12.0, step_fb, fb_from_prev)
+    for c in range(len(rest)):
+        yield (None, float(e[c, bad[c]])) if bad[c] >= 0 else (list(q[c]), 0.0)
+    return
 
 
 def _axis_angle(k, deg):
@@ -312,6 +351,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
     cands = _grasp_candidates(pitches=pitches)
     if only is not None:  # e.g. a place pose must hold the vial exactly like the grasp did: same pitch, dz, shallow
         cands = [c for c in cands if all(c[i] == v for i, v in only.items())]
+    items = []  # (key, tag, a_dir, [(seed, target)...]) in cost order
     for pitch, dz, shallow, spin in cands[:max_tries]:
         if (pitch, dz, shallow, spin) in skip:
             continue
@@ -326,23 +366,18 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
         P = np.eye(4)
         P[:3, :3] = _axis_angle(Hs, pitch)
         P[:3, 3] = pivot - P[:3, :3] @ pivot
-        chain, prev, bad = [], None, None
+        tl = []
         for q in [G["qa"]] + G["sub"] + [G["q"]] + G["lift"]:
             qr = np.array(q, float)
             qr[0] += dth
             T = kin.fk(qr)
             T[:3, 3] += np.r_[target - V0r, dz]
-            T = P @ turn_about(T, target, spin)
-            qn, e = ik_walk(qr, T) if prev is None else ik(prev, T)
-            if e > 0.3:
-                qn, e = ik_walk(qr, T)
-            if e > 0.3:
-                bad = f"IK err {e:.2f}"
-                break
-            chain.append(qn)
-            prev = qn
-        if bad:
-            why.append(f"{tag}: {bad}")
+            tl.append((qr, P @ turn_about(T, target, spin)))
+        items.append(((pitch, dz, shallow, spin), tag, a_dir, tl))
+    for (key, tag, a_dir, _), (chain, e) in zip(items, _chains([it[3] for it in items])):
+        pitch, dz, shallow, spin = key
+        if chain is None:
+            why.append(f"{tag}: IK err {e:.2f}")
             continue
         qa, sub, qg, lift = chain[0], chain[1:4], chain[4], chain[5:]
         lim = min(limit_margin(q) for q in chain)
@@ -380,27 +415,22 @@ def plan_pour(cup_xy, scene: Scene, api=None, obs=None, pitch=0.0, max_tries=40)
     up_f = Cl[:3, :3].T @ UP_F
     v_f = np.linalg.solve(Cl, np.r_[VIAL_F, 1.0])[:3]  # vial centre in the (pitched) flange frame
     why = []
+    items = []
     for spin, roll in _pour_candidates()[:max_tries]:
         Rr = np.eye(4)
         Rr[:3, :3] = _axis_angle(up_f, roll)
         Rr[:3, 3] = v_f - Rr[:3, :3] @ v_f
-        chain, prev, bad = [], None, None
+        tl = []
         for q in [P["q40"]] + P["tilt"]:
             qr = np.array(q, float)
             qr[0] += dth
             T = kin.fk(qr)
             T[:3, 3] += np.r_[C - C0r, 0.0]
-            T = turn_about(T, C, spin) @ Cl @ Rr
-            qn, e = ik_walk(qr, T) if prev is None else ik(prev, T)
-            if e > 0.3:
-                qn, e = ik_walk(qr if prev is None else prev, T, step_mm=4.0)
-            if e > 0.3:
-                bad = f"IK err {e:.2f}"
-                break
-            chain.append(qn)
-            prev = qn
-        if bad:
-            why.append(f"spin {spin} roll {roll}: {bad}")
+            tl.append((qr, turn_about(T, C, spin) @ Cl @ Rr))
+        items.append(((spin, roll), tl))
+    for ((spin, roll), _), (chain, e) in zip(items, _chains([it[1] for it in items], step_fb=4.0, fb_from_prev=True)):
+        if chain is None:
+            why.append(f"spin {spin} roll {roll}: IK err {e:.2f}")
             continue
         q40, tilt = chain[0], chain[1:]
         lim = min(limit_margin(q) for q in chain)

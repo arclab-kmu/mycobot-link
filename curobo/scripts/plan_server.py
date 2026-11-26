@@ -399,16 +399,55 @@ class Service:
         with self.plan_lock:
             if obs is not None:
                 self.set_world(obs)
-            for i in idx:
-                rep = self.mp.collision_report(np.radians(q[i]))
-                if rep["self"] or rep["obstacles"] or rep["limits"]:
-                    why = {"self": {"/".join(k): round(v * 1000, 1) for k, v in rep["self"].items()},
-                           "obstacles": {"/".join(k): round(v * 1000, 1) for k, v in rep["obstacles"].items()},
+            res = self._check_one(q, idx)
+        return {**res, "check_ms": round((time.perf_counter() - t0) * 1e3, 1)}
+
+    def _check_one(self, q: np.ndarray, idx: list[int]) -> dict:
+        """All sampled rows in one batched GPU check; the first hit gets collision_report's detail."""
+        hit = self.mp.collision_batch(q[idx])
+        if hit.any():
+            i = idx[int(np.argmax(hit))]
+            rep = self.mp.collision_report(np.radians(q[i]))
+            why = {"self": {"/".join(k): round(v * 1000, 1) for k, v in rep["self"].items()},
+                   "obstacles": {"/".join(k): round(v * 1000, 1) for k, v in rep["obstacles"].items()},
+                   "limits": rep["limits"]}
+            return {"ok": False, "status": "collision", "index": i, "n": len(q), "detail": why}
+        return {"ok": True, "status": "clear", "n": len(q), "checked": len(idx)}
+
+    def check_many(self, req: dict) -> dict:
+        """Several paths against one world in one call: {"trajs": [[[6 deg]...]...], "obstacles"?, "stride"?}.
+        Returns {"results": [per path, as /check]}; all rows of all paths share one batched GPU check."""
+        t0 = time.perf_counter()
+        trajs = [np.asarray(x, float) for x in req.get("trajs", [])]
+        if not trajs or any(q.ndim != 2 or q.shape[1] != 6 or len(q) < 1 or not np.all(np.isfinite(q)) for q in trajs):
+            raise BadRequest("trajs must be a list of [N][6] degree lists")
+        stride = max(1, int(req.get("stride", 1)))
+        obs = self._parse_obstacles(req["obstacles"]) if "obstacles" in req else None
+        idxs = []
+        for q in trajs:
+            idx = list(range(0, len(q), stride))
+            if idx[-1] != len(q) - 1:
+                idx.append(len(q) - 1)
+            idxs.append(idx)
+        with self.plan_lock:
+            if obs is not None:
+                self.set_world(obs)
+            allq = np.vstack([q[idx] for q, idx in zip(trajs, idxs)])
+            hit = self.mp.collision_batch(allq)
+            out, k = [], 0
+            for q, idx in zip(trajs, idxs):
+                h = hit[k:k + len(idx)]
+                k += len(idx)
+                if h.any():
+                    i = idx[int(np.argmax(h))]
+                    rep = self.mp.collision_report(np.radians(q[i]))
+                    why = {"self": {"/".join(kk): round(v * 1000, 1) for kk, v in rep["self"].items()},
+                           "obstacles": {"/".join(kk): round(v * 1000, 1) for kk, v in rep["obstacles"].items()},
                            "limits": rep["limits"]}
-                    return {"ok": False, "status": "collision", "index": i, "n": len(q), "detail": why,
-                            "check_ms": round((time.perf_counter() - t0) * 1e3, 1)}
-        return {"ok": True, "status": "clear", "n": len(q), "checked": len(idx),
-                "check_ms": round((time.perf_counter() - t0) * 1e3, 1)}
+                    out.append({"ok": False, "status": "collision", "index": i, "n": len(q), "detail": why})
+                else:
+                    out.append({"ok": True, "status": "clear", "n": len(q), "checked": len(idx)})
+        return {"ok": True, "results": out, "check_ms": round((time.perf_counter() - t0) * 1e3, 1)}
 
     def _dh_end_err(self, q_deg, pos, quat, tcp_off) -> np.ndarray:
         """target - reached (mm, base frame) of the tool point under the DH model."""
@@ -524,6 +563,8 @@ def make_handler(svc: Service):
                     out = svc.plan(req)
                 elif path == "/check":
                     out = svc.check(req)
+                elif path == "/check_many":
+                    out = svc.check_many(req)
                 elif path == "/spheres":
                     out = svc.spheres(req)
                 elif path == "/state":

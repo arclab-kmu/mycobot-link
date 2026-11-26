@@ -265,6 +265,50 @@ class MycobotPlanner:
         return {"self": pairs, "obstacles": contacts, "limits": limits,
                 "lowest": (float(c[low, 2] - r[low]), str(owner[low]))}
 
+    def collision_batch(self, q_deg: np.ndarray, chunk: int = 512) -> np.ndarray:
+        """``collision_report`` for many configurations at once: one GPU kinematics call per chunk and the same
+        sphere geometry in torch. Returns a bool per row of ``q_deg`` (degrees): self, obstacle or limit hit.
+        2026-11-26: /check called ``collision_report`` once per sample (~0.1 ms of GPU work behind a sync each),
+        and the matcha planner spent 20 s of a 55 s plan in those round trips."""
+        q_deg = np.atleast_2d(np.asarray(q_deg, float))
+        owner, pair_ok = self._sphere_tables()
+        dev = "cuda"
+        pair_ok_t = torch.as_tensor(pair_ok, device=dev)
+        lim = self.planner.kinematics.get_joint_limits().position.to(dev, torch.float32)
+        boxes = []
+        for ob in self.obstacles:
+            w, x, y, z = ob.pose[3:]
+            R = [[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                 [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                 [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]]
+            boxes.append((ob.pose[:3], R, np.asarray(ob.dims, float) / 2))
+        if boxes:
+            P = torch.tensor(np.array([b[0] for b in boxes]), device=dev, dtype=torch.float32)  # [M,3]
+            Rb = torch.tensor(np.array([b[1] for b in boxes]), device=dev, dtype=torch.float32)  # [M,3,3]
+            H = torch.tensor(np.array([b[2] for b in boxes]), device=dev, dtype=torch.float32)  # [M,3]
+        out = np.zeros(len(q_deg), dtype=bool)
+        for s in range(0, len(q_deg), chunk):
+            qr = torch.tensor(np.radians(q_deg[s:s + chunk]), device=dev, dtype=torch.float32)
+            sph = self.planner.compute_kinematics(JointState.from_position(qr.contiguous(), joint_names=list(ARM_JOINTS)))
+            sph = sph.robot_spheres.reshape(len(qr), -1, 4)
+            if sph.shape[1] != len(owner):
+                raise RuntimeError(f"{sph.shape[1]} spheres from kinematics, {len(owner)} in the yml")
+            c, r = sph[..., :3], sph[..., 3]
+            active = r > 0
+            pen = r[:, :, None] + r[:, None, :] - torch.cdist(c, c)
+            hit = (pair_ok_t[None] & (pen > 0) & active[:, :, None] & active[:, None, :]).flatten(1).any(1)
+            if boxes:
+                local = torch.einsum("bsk,mkj->bmsj", c, Rb) - torch.einsum("mk,mkj->mj", P, Rb)[None, :, None, :]
+                a = local.abs()
+                dist = torch.linalg.norm(torch.clamp(a - H[None, :, None, :], min=0.0), dim=-1)
+                inside = (a <= H[None, :, None, :]).all(-1)
+                to_face = (H[None, :, None, :] - a).min(-1).values
+                depth = torch.where(inside, r[:, None, :] + to_face, r[:, None, :] - dist)
+                hit |= ((depth > 0) & active[:, None, :]).flatten(1).any(1)
+            hit |= ((qr < lim[0] - 1e-6) | (qr > lim[1] + 1e-6)).any(1)
+            out[s:s + len(qr)] = hit.cpu().numpy()
+        return out
+
     def in_collision(self, q: Sequence[float]) -> bool:
         """Self- or obstacle collision at ``q``, or outside the margin-shrunk joint limits."""
         rep = self.collision_report(q)
