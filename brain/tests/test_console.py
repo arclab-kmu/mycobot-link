@@ -126,3 +126,36 @@ def test_box_clamps(tmp_path):
     ws = _workspace(tmp_path)
     q, clipped = ws.box.clamp(np.array([0.0, 0.0, 100.0]))
     assert clipped and q[2] == 210
+
+
+def test_match_template_clamps_a_box_that_leaves_the_frame():
+    # 2026-11-26: a cup at the top edge gave v0 = -37; numpy wrapped that around to the bottom rows
+    import numpy as np
+
+    from mycobot_brain.console.scenario import match_template
+
+    rng = np.random.default_rng(0)
+    gray = rng.uniform(0, 50, (480, 640))
+    tpl = np.zeros((28, 28))
+    tpl[8:20, 8:20] = 255.0
+    gray[2:30, 510:538] = tpl  # template centre (524, 16), near the top edge
+    corr, u, v = match_template(gray, tpl, [464, -37, 554, 42])
+    assert corr > 0.95 and (u, v) == (524.0, 16.0)
+    corr, _, _ = match_template(gray, tpl, [700, 10, 720, 20])  # nothing of the box inside the frame
+    assert corr < 0
+
+
+def test_task_choice_request_lists_the_scenarios_and_allows_none():
+    req = vlm.build_task_request("말차 한 잔 타 줄래?", {"top": b"\xff\xd8"}, {"컵에 말차 가루를 타 줘": "말차 타기", "카메라 보정": "보정"})
+    enum = req["response_format"]["json_schema"]["schema"]["properties"]["task"]["enum"]
+    assert enum == ["컵에 말차 가루를 타 줘", "카메라 보정", vlm.TASK_NONE]
+    assert "User: 말차 한 잔 타 줄래?" in req["messages"][1]["content"][-1]["text"]
+
+
+def test_parse_task_maps_none_and_rejects_unknown_names():
+    names = ["컵에 말차 가루를 타 줘"]
+    got = vlm.parse_task('{"task": "컵에 말차 가루를 타 줘", "seen": "컵과 병 두 개", "say": "말차를 탈게요"}', names)
+    assert got["task"] == "컵에 말차 가루를 타 줘" and got["say"] == "말차를 탈게요"
+    assert vlm.parse_task('{"task": "none", "seen": "", "say": ""}', names)["task"] is None
+    with pytest.raises(PlannerError):
+        vlm.parse_task('{"task": "커피 타기", "seen": "", "say": ""}', names)

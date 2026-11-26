@@ -68,6 +68,17 @@ def heights(depth_png: bytes, pts, r=3):
     return out
 
 
+#: Where a cup can be used at all, in the .77 frame (mm): the 140 deg pour was searched for cups on
+#: x 140..320, y -80..160 (map77.py) and the cups of every run so far sat at x 186..241, y -112..47.
+#: The parked .77 elbow (68, -175) and the spare cups beside the table fall outside.
+CUP_X, CUP_Y = (130.0, 340.0), (-130.0, 180.0)
+
+
+def cup_ok(u, v, z=RIM_Z) -> bool:
+    x, y = to77(at(u, v, z), cal77())
+    return CUP_X[0] <= x <= CUP_X[1] and CUP_Y[0] <= y <= CUP_Y[1]
+
+
 def rim_px_radius(u, v, r_mm=37.2, z=RIM_Z):
     """Pixel radius of a horizontal circle of r_mm at height z centred under pixel (u, v)."""
     c = at(u, v, z)

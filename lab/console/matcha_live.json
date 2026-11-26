@@ -1,4 +1,15 @@
-{"trigger": "컵에 말차 가루를 타 줘", "title": "말차 타기 (지금 위치로 계획)",
+{
+ "trigger": "컵에 말차 가루를 타 줘",
+ "title": "말차 타기 (지금 위치로 계획)",
  "say": "위 카메라로 컵과 말차 병의 지금 위치를 재고 바로 계획합니다.",
- "generator": {"cmd": ["/home/hkim/IsaacLab/.venv/bin/python", "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
-                       "--photo-dir", "/home/hkim/Documents/lab-jetson/console/plans/last"], "timeout_s": 60}}
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
+   "--photo-dir",
+   "/home/hkim/Documents/lab-jetson/console/plans/last"
+  ],
+  "timeout_s": 60
+ },
+ "vlm_desc": "컵에 말차 가루를 넣고 스푼으로 저어 말차 한 잔을 탄다 (말차 병 잡기, 붓기, 젓기까지 전체)"
+}

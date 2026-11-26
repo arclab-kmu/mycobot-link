@@ -240,9 +240,46 @@ class Console:
         }
         self.task = {"text": text, "arm": arm, "running": True, "phase": "look", "status": "카메라 프레임을 모으는 중",
                      "say": "", "seen": "", "steps": [], "step": -1, "progress": 0.0, "marks": {}, **opts}
-        self._task_thread = threading.Thread(target=self._run_task, args=(text, arm, opts), name="task", daemon=True)
+        target = self._route_then_run if self.scenarios else self._run_task
+        self._task_thread = threading.Thread(target=target, args=(text, arm, opts), name="task", daemon=True)
         self._task_thread.start()
         return {"ok": True}
+
+    def _route_then_run(self, text: str, arm_name: str, opts: dict[str, Any]) -> None:
+        """A sentence that is not a scenario name: the VLM reads it with the camera frames and either names the
+        prepared scenario it means (which then measures, plans and runs as usual) or none (free-form chunks)."""
+        t = self.task
+        try:
+            images, _ = self._images()
+            # only scenarios meant for users (tests and calibration set "vlm": false), described by "vlm_desc"
+            tasks = {k: sc.get("vlm_desc", sc.get("title", k)) for k, sc in self.scenarios.items() if sc.get("vlm", True)}
+            if not tasks:
+                self._run_task(text, arm_name, opts)
+                return
+            t.update(phase="think", status=f"VLM이 명령을 읽는 중 ({self.vlm_model})")
+            t0 = time.time()
+            pick = vlm_mod.choose_task(text, images, tasks, base_url=self.vlm_url, model=self.vlm_model)
+            self.vlm_last_s = time.time() - t0
+        except Exception as exc:  # noqa: BLE001 - the free-form path still works without the routing answer
+            self.say(f"VLM 작업 고르기 실패, 자유 동작으로: {exc}")
+            self._run_task(text, arm_name, opts)
+            return
+        if t.get("stop"):
+            t.update(running=False, phase="idle", status="멈춤")
+            return
+        if pick["task"] is None:
+            self.say(f"VLM {self.vlm_last_s:.1f} s: 준비된 작업 없음, 자유 동작으로. {pick['say']}")
+            self._run_task(text, arm_name, opts)
+            return
+        sc = self.scenarios[pick["task"]]
+        self.say(f"VLM {self.vlm_last_s:.1f} s: '{text}' → '{sc.get('title', pick['task'])}'. {pick['seen']} {pick['say']}")
+        from mycobot_brain.console import scenario as sc_mod
+
+        t.update(arm=sc["phases"][0]["arm"] if sc.get("phases") else arm_name, phase="plan",
+                 status="위 카메라로 측정하고 계획하는 중" if sc.get("generator") else "미리 계획한 시나리오",
+                 say=pick["say"], seen=pick["seen"], steps=sc_mod.labels(sc), scenario=sc.get("title", pick["task"]),
+                 routed_by_vlm=True, vlm_seen=pick["seen"])
+        self._run_scenario(sc, bool(opts.get("execute")))
 
     def stop(self) -> dict[str, Any]:
         for runner in (self.runner, self.runner2):
@@ -468,9 +505,13 @@ class Console:
         try:
             if sc.get("generator"):
                 t0 = time.time()
-                self.say(f"시나리오 '{sc.get('title', sc['trigger'])}': 위 카메라로 지금 위치를 재고 계획합니다 (VLM 안 씀)")
+                how = "VLM이 고른 작업" if t.get("routed_by_vlm") else "VLM 안 씀"
+                self.say(f"시나리오 '{sc.get('title', sc['trigger'])}': 위 카메라로 지금 위치를 재고 계획합니다 ({how})")
                 sc = sc_mod.generate(sc, self.say)
-                t.update(say=sc.get("say", ""), seen=sc.get("seen", ""), steps=sc_mod.labels(sc),
+                seen = sc.get("seen", "")
+                if t.get("vlm_seen"):  # keep what the VLM saw next to what the planner measured
+                    seen = f"VLM: {t['vlm_seen']} / 계획: {seen}"
+                t.update(say=sc.get("say", ""), seen=seen, steps=sc_mod.labels(sc),
                          arm=sc["phases"][0]["arm"], scenario=sc.get("title", t.get("scenario")))
                 self.say(f"측정·계획 {time.time() - t0:.1f} s")
             else:

@@ -1,0 +1,14 @@
+{
+ "trigger": ".77 출발 자세로",
+ "title": ".77 출발 자세(PARK)로",
+ "vlm": false,
+ "say": ".77을 지금 자세에서 출발 자세로 돌립니다.",
+ "seen": "",
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/park77.py"
+  ],
+  "timeout_s": 30
+ }
+}

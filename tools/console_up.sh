@@ -31,7 +31,7 @@ if port_free 8096; then
 fi
 # command-box scenarios that sit next to the workspace file (measure-and-plan generators, see planner/README.md)
 scen=()
-for f in matcha_live matcha_grasp_test matcha_move_test cal77_scenario; do
+for f in matcha_live matcha_grasp_test matcha_move_test cal77_scenario park77; do
   [ -f "$(dirname "$WS")/$f.json" ] && scen+=(--scenario "$(dirname "$WS")/$f.json")
 done
 cd "$HERE/brain"

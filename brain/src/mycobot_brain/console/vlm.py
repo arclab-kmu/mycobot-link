@@ -1,4 +1,4 @@
-"""Instruction + camera frames -> one action chunk, from the Spark's VLM.
+"""Instruction + camera frames -> one action chunk (or the prepared task meant), from the console VLM.
 
 The old ``act`` loop asked for one bounded joint delta per call: about 2 s of
 model time for 5 degrees of motion, then a stop, then a new photo. That is the
@@ -177,3 +177,72 @@ def propose_chunk(
 ) -> dict[str, Any]:
     req = build_chunk_request(instruction, images, state_text, world_axes, model, history)
     return parse_chunk(chat(req, base_url=base_url, timeout=timeout, opener=opener))
+
+
+# -- which prepared task does the user mean? ------------------------------------------------
+#: Answer for "no listed task fits": the console then falls back to free-form action chunks.
+TASK_NONE = "none"
+
+
+def task_schema(names: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "enum": [*names, TASK_NONE]},
+            "seen": {"type": "string"},
+            "say": {"type": "string"},
+        },
+        "required": ["task", "seen", "say"],
+        "additionalProperties": False,
+    }
+
+
+def build_task_request(instruction: str, images: dict[str, bytes], tasks: dict[str, str],
+                       model: str = DEFAULT_VLM_MODEL) -> dict[str, Any]:
+    """``tasks`` = {exact task name: one-line description}. The model picks one name or none."""
+    system = (
+        "You read a user's request to a table robot with two small arms (myCobot 280): one holds a two-finger "
+        "gripper, the other a spoon. You also get its camera images. The robot has prepared tasks that measure "
+        "the table and plan their own motion. If one listed task does what the user asks, answer its exact name "
+        f"in task; if none fits, answer {TASK_NONE}. seen = one sentence on what is on the table and say = one short "
+        "sentence on what the robot will do, both in the user's language."
+    )
+    content: list[dict[str, Any]] = []
+    for name, jpeg in images.items():
+        content.append({"type": "text", "text": f"{name.upper()} camera:"})
+        content.append(image_part(jpeg))
+    lines = ["Prepared tasks:"] + [f"- {k}: {v}" for k, v in tasks.items()] + [f"User: {instruction}"]
+    content.append({"type": "text", "text": "\n".join(lines)})
+    return {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "task_choice", "schema": task_schema(list(tasks))}},
+        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0,
+        "max_tokens": 300,
+    }
+
+
+def parse_task(content: str, names: list[str]) -> dict[str, Any]:
+    """{"task": a listed name or None, "seen", "say"}; anything else is an error, not a guess."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`").split("\n", 1)[-1].rsplit("```", 1)[0]
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlannerError(f"not JSON: {content[:200]!r}") from exc
+    if not isinstance(raw, dict):
+        raise PlannerError(f"need an object, got {content[:200]!r}")
+    task = raw.get("task")
+    if task != TASK_NONE and task not in names:
+        raise PlannerError(f"unknown task {task!r}")
+    return {"task": None if task == TASK_NONE else task, "seen": str(raw.get("seen", ""))[:400],
+            "say": str(raw.get("say", ""))[:400]}
+
+
+def choose_task(instruction: str, images: dict[str, bytes], tasks: dict[str, str], *,
+                base_url: str = DEFAULT_VLM_URL, model: str = DEFAULT_VLM_MODEL, timeout: float = 60.0,
+                opener: Any = None) -> dict[str, Any]:
+    req = build_task_request(instruction, images, tasks, model)
+    return parse_task(chat(req, base_url=base_url, timeout=timeout, opener=opener), list(tasks))

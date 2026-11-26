@@ -1,7 +1,9 @@
 """matcha_dyn.py [--out scen.json] [--photo-dir DIR]: measure, plan and check the matcha scenario now.
 
 1. top camera colour + depth -> cup rim, matcha vial (greenest cap), other vials (caps at vial height)
-2. .77: grasp / carry / 140-degree pour with two shakes / return (plan77, templates + J1 turn + IK)
+2. .77: grasp / carry / 140-degree pour with two shakes / return (plan77, templates + J1 turn + IK).
+   A vial too far for the flat grasp + pour is first carried (tipped grasp) to the nearest free spot
+   of NEAR_SPOTS from which the whole pour plans (relocate)
 3. .70: stir at the measured cup (plan70) with the top-camera centring step at the dip
 4. the .70 starts during the .77 return; the delay is the smallest one whose two-arm clearance
    (cuRobo spheres + vial + spoon, +-1.5 s timing skew) stays above the margins
@@ -149,8 +151,45 @@ def measure(photo_dir=None):
         Path(photo_dir).mkdir(parents=True, exist_ok=True)
         (Path(photo_dir) / "top.jpg").write_bytes(rgb_b)
         (Path(photo_dir) / "top_depth.png").write_bytes(dep_b)
-    d = detect.detect(rgb, lambda pts: locate.heights(dep_b, pts), r_fix=locate.rim_px_radius)
+    d = detect.detect(rgb, lambda pts: locate.heights(dep_b, pts), r_fix=locate.rim_px_radius, cup_ok=locate.cup_ok)
     return rgb, d
+
+
+#: Spots in the .77 frame (mm) from which the flat grasp + 140 deg pour planned on 2026-11-25 (reach map);
+#: a vial that cannot be poured from where it stands is moved to the nearest free one first.
+NEAR_SPOTS = [(157.0, -164.0), (150.0, -140.0), (165.0, -185.0), (140.0, -120.0), (170.0, -140.0), (130.0, -150.0)]
+SPOT_CLEAR_CUP, SPOT_CLEAR_VIAL = 95.0, 60.0  # centre distances (mm) from the cup and the other vials
+RELOCATE_BUDGET_S = 40.0
+
+
+def relocate(vial77, cup77, others77, start77, t0):
+    """(move phase, pour phase, info, spot): carry the vial to a NEAR_SPOTS spot, then plan the pour from there."""
+    others = [o.tolist() for o in others77]
+    free = [s for s in NEAR_SPOTS
+            if math.dist(s, cup77) >= SPOT_CLEAR_CUP and all(math.dist(s, o[:2]) >= SPOT_CLEAR_VIAL for o in others77)
+            and math.dist(s, vial77) >= 15.0]
+    free.sort(key=lambda s: math.dist(s, vial77))
+    tried = []
+    for s in free:
+        if time.perf_counter() - t0 > RELOCATE_BUDGET_S:
+            break
+        try:
+            ph_mv, info_mv = plan77.plan_move(vial77, np.array(s), others, API, WS.obstacles_for(WS.arms["77"]), cup_xy=cup77, q_start=start77)
+        except plan77.PlanError as exc:
+            tried.append(f"move to {s}: {str(exc)[:80]}")
+            continue
+        q_end = np.asarray(ph_mv["segments"][-1]["q"][-1], float)
+        q_next = None if np.max(np.abs(q_end - plan77.PARK)) < 5 else q_end
+        try:
+            ph77, info77 = plan77.plan_phase(np.array(s), cup77, others, API, WS.obstacles_for(WS.arms["77"]), q_start=q_next)
+        except plan77.PlanError as exc:
+            tried.append(f"pour from {s}: {str(exc)[:80]}")
+            continue
+        log(f"relocate: carry to ({s[0]:.0f}, {s[1]:.0f}) planned in {info_mv['t_total_s']:.2f} s (pick {info_mv['pick']}), "
+            f"then pour from there")
+        info77 = dict(info77, moved_to=list(s), move_pick=info_mv["pick"])
+        return ph_mv, ph77, info77, s
+    raise plan77.PlanError("말차 병을 붓기 좋은 자리로 옮기는 계획도 찾지 못했어요: " + "; ".join(tried[-3:] or ["빈 자리 없음"]))
 
 
 def build(photo_dir=None, only=None, move_to=None):
@@ -180,8 +219,15 @@ def build(photo_dir=None, only=None, move_to=None):
         return {"trigger": "말차 병 옮기기", "title": "말차 병 옮기기 (시험)",
                 "say": f"말차 병을 ({vial77[0]:.0f}, {vial77[1]:.0f})에서 ({move_to[0]:.0f}, {move_to[1]:.0f}) mm로 옮깁니다. 계획 {total:.1f}초.",
                 "seen": "위 카메라로 병·컵 위치를 재고 경로는 cuRobo로 검사했습니다.", "phases": [ph]}
-    ph77, info77 = plan77.plan_phase(vial77, cup77, [o.tolist() for o in others77], API, WS.obstacles_for(WS.arms["77"]),
-                                     q_start=start77, grasp_test=(only == "grasp"))
+    moved, ph_mv = None, None
+    try:
+        ph77, info77 = plan77.plan_phase(vial77, cup77, [o.tolist() for o in others77], API, WS.obstacles_for(WS.arms["77"]),
+                                         q_start=start77, grasp_test=(only == "grasp"))
+    except plan77.PlanError as exc:
+        if only == "grasp":
+            raise
+        log(f"no flat grasp + pour from ({vial77[0]:.0f}, {vial77[1]:.0f}): {str(exc)[:160]}")
+        ph_mv, ph77, info77, moved = relocate(vial77, cup77, others77, start77, t0)
     if only == "grasp":
         total = time.perf_counter() - t0
         return {"trigger": "말차 병 잡기 시험", "title": "말차 병 잡고 들었다 놓기 (시험)",
@@ -210,7 +256,9 @@ def build(photo_dir=None, only=None, move_to=None):
     H = 14
     au, av = ax
     centre = {"kind": "center", "label": "컵 중심 확인(위 카메라)", "camera": "top", "template": str(HERE / "data" / "bowl.png"),
-              "search": [int(au - 45 - H), int(av - 40 - H), int(au + 45 - H), int(av + 40 - H)], "axis_px": np.round(ax, 2).tolist(),
+              # top-left corners of the 2H template, kept inside the 640 x 480 frame (a cup at the frame edge pushed v0 below 0)
+              "search": [max(int(au - 45 - H), 0), max(int(av - 40 - H), 0), min(int(au + 45 - H), 640 - 2 * H), min(int(av + 40 - H), 480 - 2 * H)],
+              "axis_px": np.round(ax, 2).tolist(),
               "px2mm": np.round(px2mm, 5).tolist(), "J": np.round(J, 4).tolist(), "max_err_mm": 22, "deadzone_mm": 2, "min_corr": 0.6}
     R3 = lambda Q: np.round(np.asarray(Q), 3).tolist()  # noqa: E731
     ph70 = {"arm": "70", "label": "스푼으로 젓기", "speed_dps": 80, "workspace_obstacles": False, "backlash": BACKLASH70, "v0": 1.0,
@@ -237,12 +285,14 @@ def build(photo_dir=None, only=None, move_to=None):
     total = time.perf_counter() - t0
     TA = plan77.TPL["pour"]["tilt_angles"]
     scen = {"trigger": "컵에 말차 가루를 타 줘", "title": "말차 타기 (지금 위치로 계획)",
-            "say": f"위 카메라로 컵과 병을 찾고 {total:.1f}초 만에 계획했습니다. .77이 말차 병을 잡아 {TA[-1]}도까지 기울여 두 번 털고, "
-                   f"병을 제자리로 가져가는 동안 .70이 컵으로 와서 스푼으로 젓습니다.",
+            "say": f"위 카메라로 컵과 병을 찾고 {total:.1f}초 만에 계획했습니다. "
+                   + (f"병이 멀어서 먼저 숙여 잡아 ({moved[0]:.0f}, {moved[1]:.0f}) mm로 옮긴 뒤, " if moved else "")
+                   + f".77이 말차 병을 잡아 {TA[-1]}도까지 기울여 두 번 털고, 병을 제자리로 가져가는 동안 .70이 컵으로 와서 스푼으로 젓습니다.",
             "seen": f"말차 병 ({vial77[0]:.0f}, {vial77[1]:.0f}) mm, 컵 ({cup77[0]:.0f}, {cup77[1]:.0f}) mm (.77 기준), "
                     f"다른 병 {len(others77)}개. 경로는 cuRobo로, 두 팔이 겹치는 구간은 시간축 거리로 검사했습니다.",
-            "phases": [ph77, ph70],
+            "phases": ([ph_mv] if ph_mv else []) + [ph77, ph70],
             "_plan": {"t_measure_s": round(t_meas, 2), "t_total_s": round(total, 2), "vial77": vial77.round(1).tolist(),
+                      "moved_to": None if moved is None else list(moved),
                       "cup77": cup77.round(1).tolist(), "cup_px": [round(cup["u"], 1), round(cup["v"], 1)],
                       "vial_px": [round(m["u"], 1), round(m["v"], 1)], "others77": [o.round(1).tolist() for o in others77],
                       "info77": {k: (float(v) if isinstance(v, (np.floating, float)) else v) for k, v in info77.items()},

@@ -58,7 +58,14 @@ def measure(q, vial, approach):
         return {"msg": f"손가락 차이를 찾지 못했어요 ({int(mask.sum())} px)"}, 1
     w = d[mask]
     cf = np.array([(uu[mask] * w).sum() / w.sum(), (vv[mask] * w).sum() / w.sum()])
-    caps = [c for c in detect.find_caps(a, None, n=8) if np.hypot(c["u"] - pred_v[0], c["v"] - pred_v[1]) < 60]
+    # With the white gripper in view the camera's auto exposure / white balance shift: on 2026-11-26 the cap read
+    # gray 139 and its wood ring 0, so the table-scene thresholds dropped it. Here the cap's pixel is predicted, so
+    # search near it with loose thresholds, and skip anything on the pixels the fingers changed.
+    moved = np.zeros_like(d, dtype=bool)
+    moved[mask] = True
+    near_finger = lambda c: moved[max(int(c["v"]) - 12, 0):int(c["v"]) + 13, max(int(c["u"]) - 12, 0):int(c["u"]) + 13].any()  # noqa: E731
+    caps = [c for c in detect.find_caps(a, None, n=40, gray_min=100.0, wood_min=0.0)
+            if np.hypot(c["u"] - pred_v[0], c["v"] - pred_v[1]) < 60 and not near_finger(c)]
     if not caps:
         return {"msg": "예상 위치 근처에서 병뚜껑을 찾지 못했어요"}, 1
     c = max(caps, key=lambda c_: c_["green"])

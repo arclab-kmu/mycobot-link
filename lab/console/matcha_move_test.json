@@ -1,4 +1,17 @@
-{"trigger": "말차 병 옮기기", "title": "말차 병 옮기기 (시험)",
+{
+ "trigger": "말차 병 옮기기",
+ "title": "말차 병 옮기기 (시험)",
  "say": "위 카메라로 말차 병을 찾아 (120, -120) mm 자리로 옮깁니다.",
- "generator": {"cmd": ["/home/hkim/IsaacLab/.venv/bin/python", "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
-                       "--move-to", "120,-120", "--photo-dir", "/home/hkim/Documents/lab-jetson/console/plans/last_move"], "timeout_s": 60}}
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
+   "--move-to",
+   "120,-120",
+   "--photo-dir",
+   "/home/hkim/Documents/lab-jetson/console/plans/last_move"
+  ],
+  "timeout_s": 60
+ },
+ "vlm": false
+}

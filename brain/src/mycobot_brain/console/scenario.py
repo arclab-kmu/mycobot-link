@@ -90,7 +90,13 @@ def match_template(gray: np.ndarray, tpl: np.ndarray, box: list[int]) -> tuple[f
     """Best normalised-correlation centre of ``tpl`` inside ``box`` (u0, v0, u1, v1). Returns (corr, u, v)."""
     h, w = tpl.shape
     t = (tpl - tpl.mean()) / (tpl.std() + 1e-6)
+    H, W = gray.shape
     u0, v0, u1, v1 = box
+    # clamp the corners into the frame: a negative v0 would wrap around and search the bottom rows
+    u0, v0 = max(int(u0), 0), max(int(v0), 0)
+    u1, v1 = min(int(u1), W - w), min(int(v1), H - h)
+    if u1 < u0 or v1 < v0:
+        return -1.0, float("nan"), float("nan")
     win = np.lib.stride_tricks.sliding_window_view(gray[v0:v1 + h, u0:u1 + w], (h, w))
     mu = win.mean(axis=(-1, -2))
     sd = win.std(axis=(-1, -2)) + 1e-6

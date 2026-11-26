@@ -1,4 +1,17 @@
-{"trigger": "말차 병 잡기 시험", "title": "말차 병 잡고 들었다 놓기 (시험)",
+{
+ "trigger": "말차 병 잡기 시험",
+ "title": "말차 병 잡고 들었다 놓기 (시험)",
  "say": "위 카메라로 말차 병의 지금 위치를 재고, 잡고 들었다가 같은 자리에 놓습니다.",
- "generator": {"cmd": ["/home/hkim/IsaacLab/.venv/bin/python", "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
-                       "--only", "grasp", "--photo-dir", "/home/hkim/Documents/lab-jetson/console/plans/last_grasp"], "timeout_s": 60}}
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/matcha_dyn.py",
+   "--only",
+   "grasp",
+   "--photo-dir",
+   "/home/hkim/Documents/lab-jetson/console/plans/last_grasp"
+  ],
+  "timeout_s": 60
+ },
+ "vlm": false
+}

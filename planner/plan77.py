@@ -433,11 +433,16 @@ def pick_segments(g, start, to_qa, label="말차 병 쪽으로"):
     a_dir = g["a_dir"]
     J = grasp_jac(qg)
     R = lambda Q: np.round(Q, 3).tolist()  # noqa: E731
+    # Waits: right after a joint stream the gripper starts late; on 2026-11-26 the "closed" photo 1.3 s after the
+    # command still showed open fingers (0 px changed), while 1.5 s after it at rest the change was ~2800 px.
     segs = [{"kind": "joints", "label": label, "q": R(a1), "dt": 0.05},
+            {"kind": "wait", "label": "멈춤", "seconds": 0.5},
             {"kind": "check", "label": "사진(열림)", "cmd": [py, me, "snap", "open"]},
             {"kind": "grip", "label": "손가락 오므리기", "value": 40},
+            {"kind": "wait", "label": "오므리는 중", "seconds": 1.5},
             {"kind": "check", "label": "사진(오므림)", "cmd": [py, me, "snap", "closed"]},
             {"kind": "grip", "label": "손가락 펴기", "value": 100},
+            {"kind": "wait", "label": "펴는 중", "seconds": 1.0},
             {"kind": "align", "label": "병에 맞추기(위 카메라)", "J": np.round(J, 4).tolist(), "max_err_mm": 25,
              "cmd": [py, me, "measure", "--q", *[f"{x:.3f}" for x in sub[0]], "--vial", f"{g['vial'][0]:.2f}", f"{g['vial'][1]:.2f}",
                      "--approach", f"{a_dir[0]:.4f}", f"{a_dir[1]:.4f}"]},
@@ -547,6 +552,9 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     return phase, info
 
 
+MOVE_PITCHES = (0.0, 5.0, 8.0, 12.0, 15.0, 20.0, 25.0)  # a move needs no pour, so the hand may tip further
+
+
 def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), rim_z=286.0, cup_r=40.0, place_comp_mm=3.8,
               q_start=None):
     """Pick the vial at vial_xy and stand it at to_xy (same hold: pitch, height and depth), then park."""
@@ -554,33 +562,48 @@ def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), 
     sc = Scene(cup_xy, rim_z, cup_r, others)
     obs = (list(ws_obstacles) + cup_boxes(cup_xy, rim_z, cup_r) + [box(f"vial{i}", o[0], o[1], TABLE, o[2] + 3, OTHER_VIAL_MM, OTHER_VIAL_MM)
                                                                    for i, o in enumerate(others)])[:15]
-    # a move needs no pour, so the hand may tip further (reaches farther); the place must hold it the same way
-    deep = (0.0, 5.0, 8.0, 12.0, 15.0, 20.0, 25.0)
-    g = plan_grasp(vial_xy, sc, api, obs, pitches=deep, max_tries=220)
-    h = plan_grasp(to_xy, sc, api, obs, only={0: g["pitch"], 1: g["dz"], 2: g["shallow"]}, pitches=deep)
+    # a move needs no pour, so the hand may tip further (reaches farther); the place must hold it the same way.
+    # The whole timed path is checked again at the end; a grasp that fails there is skipped and the next one tried
+    # (2026-11-26: the first tipped grasp touched the table with J4 by 0.6 mm only on the timed approach).
+    deep = MOVE_PITCHES
     start = PARK if q_start is None else np.asarray(q_start, float)
-    to_qa = thin(cu_plan(api, start, g["qa"], obs))
-    over = thin(cu_plan(api, g["lift"][-1], h["lift"][-1], obs))
-    to_park = thin(cu_plan(api, h["qa"], PARK, obs))
-    vm = min(sc.vial_margin(q) for q in over)
-    if vm < 0:
-        raise PlanError(f"carry path: vial margin {vm:.1f} mm")
-    qplace = h["q"]
-    if place_comp_mm > 0:
-        d = h["vial"][:2] - h["pad"][:2]
-        T = kin.fk(h["q"])
-        T[:3, 3] += np.r_[d / max(np.linalg.norm(d), 1e-6) * place_comp_mm, 0.0]
-        qn, e = ik(h["q"], T)
-        qplace = qn if e < 0.3 else h["q"]
-    sub, hs = g["sub"], h["sub"]
-    pick, (a1, a2, up) = pick_segments(g, start, to_qa)
-    approach = np.vstack([a1, a2])
-    carry = timed([([g["lift"][-1]] + over[1:], 45.0), (h["lift"][::-1][1:], 25.0), ([qplace], 8.0)])
-    leave = timed([([qplace, hs[2]], 12.0), ([hs[1], hs[0], h["qa"]], 30.0), (to_park[1:], 65.0)])
-    seg = lambda label, Q: {"kind": "joints", "label": label, "q": np.round(Q, 3).tolist(), "dt": 0.05}
-    phase = {"arm": "77", "label": "말차 병 옮기기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
-        *pick, seg("새 자리로 옮기기", carry), {"kind": "grip", "label": "놓기", "value": 100}, seg("park", leave)]}
-    chk = cu_check(api, np.vstack([approach, up, carry, leave]), obs)
-    if not chk.get("ok"):
-        raise PlanError(f"cuRobo check: collision at {chk.get('index')}/{chk.get('n')}: {chk.get('detail')}")
+    skip, why = set(), []
+    for _ in range(6):
+        g = plan_grasp(vial_xy, sc, api, obs, pitches=deep, max_tries=220, skip=skip)
+        try:
+            h = plan_grasp(to_xy, sc, api, obs, only={0: g["pitch"], 1: g["dz"], 2: g["shallow"]}, pitches=deep)
+        except PlanError as exc:
+            skip.add(g["key"])
+            why.append(f"{g['key']}: place {str(exc)[:60]}")
+            continue
+        to_qa = thin(cu_plan(api, start, g["qa"], obs))
+        over = thin(cu_plan(api, g["lift"][-1], h["lift"][-1], obs))
+        to_park = thin(cu_plan(api, h["qa"], PARK, obs))
+        vm = min(sc.vial_margin(q) for q in over)
+        if vm < 0:
+            skip.add(g["key"])
+            why.append(f"{g['key']}: carry path vial margin {vm:.1f} mm")
+            continue
+        qplace = h["q"]
+        if place_comp_mm > 0:
+            d = h["vial"][:2] - h["pad"][:2]
+            T = kin.fk(h["q"])
+            T[:3, 3] += np.r_[d / max(np.linalg.norm(d), 1e-6) * place_comp_mm, 0.0]
+            qn, e = ik(h["q"], T)
+            qplace = qn if e < 0.3 else h["q"]
+        hs = h["sub"]
+        pick, (a1, a2, up) = pick_segments(g, start, to_qa)
+        approach = np.vstack([a1, a2])
+        carry = timed([([g["lift"][-1]] + over[1:], 45.0), (h["lift"][::-1][1:], 25.0), ([qplace], 8.0)])
+        leave = timed([([qplace, hs[2]], 12.0), ([hs[1], hs[0], h["qa"]], 30.0), (to_park[1:], 65.0)])
+        seg = lambda label, Q: {"kind": "joints", "label": label, "q": np.round(Q, 3).tolist(), "dt": 0.05}  # noqa: E731
+        phase = {"arm": "77", "label": "말차 병 옮기기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
+            *pick, seg("새 자리로 옮기기", carry), {"kind": "grip", "label": "놓기", "value": 100}, seg("park", leave)]}
+        chk = cu_check(api, np.vstack([approach, up, carry, leave]), obs)
+        if chk.get("ok"):
+            break
+        skip.add(g["key"])
+        why.append(f"{g['key']}: collision at {chk.get('index')}/{chk.get('n')}: {chk.get('detail', {}).get('obstacles') or chk.get('detail')}")
+    else:
+        raise PlanError("cuRobo check: " + "; ".join(why[-3:]))
     return phase, dict(t_total_s=round(time.perf_counter() - t0, 2), pick=g["key"], place=h["key"], checked=chk.get("checked"))
