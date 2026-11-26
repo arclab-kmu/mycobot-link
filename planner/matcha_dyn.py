@@ -317,7 +317,7 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
     else:
         cup_w = locate.at(cup["u"], cup["v"], locate.RIM_Z)
         cup77 = locate.to77(cup_w, cal)
-    others77 = [np.r_[locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z), cal), 262.5] for c in other_caps]
+    others77 = [np.r_[locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z), cal), locate.CAP_Z - 1.5] for c in other_caps]
     log(f"measured in {t_meas:.2f} s: {vial} vial .77 ({vial77[0]:.1f}, {vial77[1]:.1f}), cup .77 ({cup77[0]:.1f}, {cup77[1]:.1f}),"
         f" other vials {[tuple(float(x) for x in np.round(o[:2], 1)) for o in others77]}")
     # .77

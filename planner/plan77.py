@@ -630,20 +630,23 @@ def lift_check(g, target="matcha"):
     """After the lift: no cap of the target vial may still stand at table height near where it stood (top camera
     depth), pushed a little included."""
     import locate  # noqa: E402 - planner module (camera model)
-    px = locate.px_of77(g["vial"][:2], 264.0)
+    px = locate.px_of77(g["vial"][:2], locate.CAP_Z)
     return {"kind": "check", "label": "들렸는지 확인(위 카메라)", "timeout_s": 15,
             "cmd": [sys.executable, str(HERE / "verify.py"), "lifted", "--px", f"{px[0]:.1f}", f"{px[1]:.1f}",
                     "--target", target]}
 
 
 
-def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40.0, place_comp_mm=3.8, q_start=None,
+def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=None, cup_r=40.0, place_comp_mm=3.8, q_start=None,
                grasp_test=False, name="말차 병", target="matcha", deeper=None, extra_obs=()):
     """Returns (phase dict for the console scenario, info). ``others`` = [(x, y, top_z)] of the other vials.
     ``deeper``: grasp depth correction (mm) instead of LAB/cal77_grasp.json's (the caller steps it down at the reach
     edge). A grasp test pours nothing, so its hand may tip like a move (MOVE_PITCHES): 2026-11-26 the matcha vial at
     r 248 had no grasp within 12 deg at any depth, and one at 10 mm deeper within 25 deg."""
     t0 = time.perf_counter()
+    if rim_z is None:
+        import locate  # noqa: E402 - planner module (camera model, object heights)
+        rim_z = locate.RIM_Z
     sc = Scene(cup_xy, rim_z, cup_r, others)
     obs = list(ws_obstacles) + cup_boxes(cup_xy, rim_z, cup_r) + [box(f"vial{i}", o[0], o[1], TABLE, o[2] + 3, OTHER_VIAL_MM, OTHER_VIAL_MM)
                                                                    for i, o in enumerate(others)]
@@ -747,11 +750,14 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
 MOVE_PITCHES = (0.0, 5.0, 8.0, 12.0, 15.0, 20.0, 25.0)  # a move needs no pour, so the hand may tip further
 
 
-def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), rim_z=286.0, cup_r=40.0, place_comp_mm=3.8,
+def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), rim_z=None, cup_r=40.0, place_comp_mm=3.8,
               extra_obs=(),
               q_start=None, name="말차 병", target="matcha"):
     """Pick the vial at vial_xy and stand it at to_xy (same hold: pitch, height and depth), then park."""
     t0 = time.perf_counter()
+    if rim_z is None:
+        import locate  # noqa: E402 - planner module (camera model, object heights)
+        rim_z = locate.RIM_Z
     sc = Scene(cup_xy, rim_z, cup_r, others)
     obs = (list(ws_obstacles) + cup_boxes(cup_xy, rim_z, cup_r) + [box(f"vial{i}", o[0], o[1], TABLE, o[2] + 3, OTHER_VIAL_MM, OTHER_VIAL_MM)
                                                                    for i, o in enumerate(others)] + list(extra_obs))[:MAX_OBS]

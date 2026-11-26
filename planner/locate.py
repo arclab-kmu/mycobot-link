@@ -34,7 +34,14 @@ _TOPCAM = LAB / "topcam.json"
 if _TOPCAM.exists():
     _p = json.loads(_TOPCAM.read_text())
     CAM.R, CAM.t = np.array(_p["R"], float), np.array(_p["t"], float)
-CAP_Z, RIM_Z = 264.0, 286.0
+CAP_Z, RIM_Z = 264.0, 286.0  # old room (table 197): cap top +67, paper cup rim +89
+# 2026-11-27 exhibit room: measured from depth (caps +65-66, cup rim in its holder +81-83). They live in the lab
+# workspace now ("object_heights", planner frame = camera world, table at 197); recam.py heights writes them.
+try:
+    _oh = json.loads(lab_file("workspace.json").read_text()).get("object_heights", {})
+    CAP_Z, RIM_Z = float(_oh.get("cap_top_mm", CAP_Z)), float(_oh.get("cup_rim_mm", RIM_Z))
+except (OSError, ValueError):
+    pass
 
 
 def cal77():

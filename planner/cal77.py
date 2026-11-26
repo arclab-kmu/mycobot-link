@@ -85,10 +85,10 @@ def cmd_plan(args):
         cup = locate.to77(locate.at(d["cup"]["u"], d["cup"]["v"], locate.RIM_Z)).tolist()
         caps = ([d["matcha"]] if d["matcha"] else []) + d["others"]
         others = [locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z)).tolist() for c in caps]
-    scene = plan77.Scene(cup, 286.0 + 25.0, 40.0 + 25.0, [[o[0], o[1], 262.5 + 25.0] for o in others])
+    scene = plan77.Scene(cup, locate.RIM_Z + 25.0, 40.0 + 25.0, [[o[0], o[1], locate.CAP_Z - 1.5 + 25.0] for o in others])
     obs = ws.obstacles_for(ws.arms["77"])
     if not args.clear:
-        obs = (obs + plan77.cup_boxes(cup, 286.0 + 25.0, 40.0 + 25.0) +
+        obs = (obs + plan77.cup_boxes(cup, locate.RIM_Z + 25.0, 40.0 + 25.0) +
                [plan77.box(f"vial{i}", o[0], o[1], 197.0, 300.0, 80, 80) for i, o in enumerate(others)])[:plan77.MAX_OBS]
     if args.keepout:
         # Objects stay on the table but the map that would place them is what this run measures (2026-11-26 night,

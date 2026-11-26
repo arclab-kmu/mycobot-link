@@ -22,6 +22,10 @@ and cal77.json (camera world -> .77) no longer hold. Three steps, each a separat
                                        height. --write: workspace.json arms.70 origin_mm/yaw_deg (s70/arm70n.py reads
                                        it). Needs a good part of the .70 inside the top depth view.
 
+  recam.py heights --cap Z --rim Z [--write]
+                                       vial cap top and cup rim (planner z, table at 197) -> workspace.json
+                                       "object_heights" (locate.CAP_Z / RIM_Z; the cup cut and the pour/stir use them)
+
 The arm77 map is a provisional one (about 5-10 mm, the sphere model is not the real shell). It is good enough for the
 cal77.py hover plan (keep-out/fence margins >= 40 mm), and cal77.py fit2d replaces it with the measured map.
 """
@@ -425,6 +429,27 @@ def _draw(path, S, th, c):
     img.save(path)
 
 
+def cmd_heights(a) -> int:
+    """Object heights in the planner frame (table at plan77.TABLE): workspace.json "object_heights"; locate.py reads them."""
+    old = (locate.CAP_Z, locate.RIM_Z)
+    new = {"cap_top_mm": round(a.cap, 1), "cup_rim_mm": round(a.rim, 1), "time": time.strftime("%Y-%m-%d %H:%M"),
+           "_src": a.src or "recam.py heights (depth above the table plane)"}
+    msg = (f"병뚜껑 {old[0]:.1f} -> {a.cap:.1f} (테이블 +{a.cap - plan77.TABLE:.1f}), "
+           f"컵 테두리 {old[1]:.1f} -> {a.rim:.1f} (테이블 +{a.rim - plan77.TABLE:.1f})")
+    if not (plan77.TABLE + 40 < a.cap < plan77.TABLE + 100 and plan77.TABLE + 50 < a.rim < plan77.TABLE + 130):
+        print(msg + ": 범위를 벗어나요 (planner 좌표 z 로 주세요, 테이블 197)")
+        return 1
+    if a.write:
+        pw = locate.LAB / "workspace.json"
+        cfg = json.loads(pw.read_text())
+        cfg["object_heights"] = new
+        pw.rename(pw.with_name(f"workspace.before-heights-{time.strftime('%Y%m%d-%H%M')}.json"))
+        pw.write_text(json.dumps(cfg, indent=1, ensure_ascii=False))
+        msg += f" -> {pw} (restart the console)"
+    print(msg)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -442,8 +467,13 @@ def main() -> int:
             p.add_argument("--png", help="draw the fitted model on the live colour image")
     sp.choices["arm70"].add_argument("--bz", nargs=2, type=float, default=[-100.0, 60.0],
                                      help="range of the .70 base height (camera world z, table at 197)")
+    p = sp.add_parser("heights")
+    p.add_argument("--cap", type=float, required=True, help="vial cap top, planner z (table at 197)")
+    p.add_argument("--rim", type=float, required=True, help="cup rim, planner z")
+    p.add_argument("--src", help="where the numbers come from")
+    p.add_argument("--write", action="store_true")
     a = ap.parse_args()
-    return {"plane": cmd_plane, "pose": cmd_pose, "arm77": cmd_arm77, "arm70": cmd_arm70}[a.cmd](a)
+    return {"plane": cmd_plane, "pose": cmd_pose, "arm77": cmd_arm77, "arm70": cmd_arm70, "heights": cmd_heights}[a.cmd](a)
 
 
 if __name__ == "__main__":
