@@ -46,6 +46,7 @@ HOUSING = np.array([[x, y, z, 1.0] for x in (-28, 0, 28) for y in (-28, 0, 30) f
 FING = np.array([[x, y, z, 1.0] for x in (-22, -12, 12, 22) for y in (-27, -15, -3) for z in (60, 75, 90)])
 GPTS = np.vstack([HOUSING, FING])
 LIM_MARGIN = 3.0
+MAX_OBS = 60  # cuRobo boxes per request (plan_server limit; its OBB cache holds 64)
 # cuRobo box for a standing vial (cap 20 mm wide): 20 mm a side. With 28 mm (4 mm a side) the 2026-11-26 approach
 # knocked the neighbouring vial over although the plan (and the measured joints) kept 16 mm from it: the camera-to-arm
 # map is off by ~10 mm, and the arm model by a few more.
@@ -637,7 +638,7 @@ def lift_check(g, target="matcha"):
 
 
 def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40.0, place_comp_mm=3.8, q_start=None,
-               grasp_test=False, name="말차 병", target="matcha", deeper=None):
+               grasp_test=False, name="말차 병", target="matcha", deeper=None, extra_obs=()):
     """Returns (phase dict for the console scenario, info). ``others`` = [(x, y, top_z)] of the other vials.
     ``deeper``: grasp depth correction (mm) instead of LAB/cal77_grasp.json's (the caller steps it down at the reach
     edge). A grasp test pours nothing, so its hand may tip like a move (MOVE_PITCHES): 2026-11-26 the matcha vial at
@@ -646,7 +647,7 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     sc = Scene(cup_xy, rim_z, cup_r, others)
     obs = list(ws_obstacles) + cup_boxes(cup_xy, rim_z, cup_r) + [box(f"vial{i}", o[0], o[1], TABLE, o[2] + 3, OTHER_VIAL_MM, OTHER_VIAL_MM)
                                                                    for i, o in enumerate(others)]
-    obs = obs[:15]
+    obs = (obs + list(extra_obs))[:MAX_OBS]  # extra_obs: depth boxes (depth77)
     pours, skip, g, p = {}, set(), None, None
     for _ in range(6):
         g = (plan_grasp(vial_xy, sc, api, obs, skip=skip, pitches=MOVE_PITCHES, max_tries=400, deeper=deeper) if grasp_test
@@ -747,12 +748,13 @@ MOVE_PITCHES = (0.0, 5.0, 8.0, 12.0, 15.0, 20.0, 25.0)  # a move needs no pour, 
 
 
 def plan_move(vial_xy, to_xy, others, api, ws_obstacles, cup_xy=(600.0, 600.0), rim_z=286.0, cup_r=40.0, place_comp_mm=3.8,
+              extra_obs=(),
               q_start=None, name="말차 병", target="matcha"):
     """Pick the vial at vial_xy and stand it at to_xy (same hold: pitch, height and depth), then park."""
     t0 = time.perf_counter()
     sc = Scene(cup_xy, rim_z, cup_r, others)
     obs = (list(ws_obstacles) + cup_boxes(cup_xy, rim_z, cup_r) + [box(f"vial{i}", o[0], o[1], TABLE, o[2] + 3, OTHER_VIAL_MM, OTHER_VIAL_MM)
-                                                                   for i, o in enumerate(others)])[:15]
+                                                                   for i, o in enumerate(others)] + list(extra_obs))[:MAX_OBS]
     # a move needs no pour, so the hand may tip further (reaches farther); the place must hold it the same way.
     # The whole timed path is checked again at the end; a grasp that fails there is skipped and the next one tried
     # (2026-11-26: the first tipped grasp touched the table with J4 by 0.6 mm only on the timed approach).

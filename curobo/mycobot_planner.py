@@ -159,7 +159,7 @@ class MycobotPlanner:
         cfg = MotionPlannerCfg.create(
             robot=self._robot_dict(velocity_scale),
             scene_model=None,
-            collision_cache={"obb": 16},
+            collision_cache={"obb": 64},
             num_ik_seeds=self._num_ik_seeds,
         )
         planner = MotionPlanner(cfg)

@@ -188,7 +188,25 @@ def measure(photo_dir=None):
         (Path(photo_dir) / "top.jpg").write_bytes(rgb_b)
         (Path(photo_dir) / "top_depth.png").write_bytes(dep_b)
     d = detect.detect(rgb, lambda pts: locate.heights(dep_b, pts), r_fix=locate.rim_px_radius, cup_ok=locate.cup_ok)
+    global LAST_DEPTH
+    LAST_DEPTH = dep_b  # the same frame's depth, for depth77.boxes()
     return rgb, d
+
+
+LAST_DEPTH = None
+
+
+def depth_obstacles(q77, vial77, cup77):
+    """What stands on the table now, from the measured frame's depth (Hojin 2026-11-26: "curobo나 경로 검사 시에는
+    depth를 이용하고"), minus the vial to grasp, the cup's inside and the .77 itself."""
+    if LAST_DEPTH is None:
+        return []
+    import depth77
+    t0 = time.perf_counter()
+    bx = depth77.boxes(LAST_DEPTH, plan77.PARK if q77 is None else q77, skip=[(float(vial77[0]), float(vial77[1]), 30.0)],
+                       cup=cup77, cup_r=55.0)
+    log(f"depth obstacles: {len(bx)} boxes in {(time.perf_counter() - t0) * 1000:.0f} ms")
+    return bx
 
 
 #: Spots in the .77 frame (mm) from which the flat grasp + 140 deg pour planned on 2026-11-25 (reach map);
@@ -298,7 +316,8 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
     start77 = None if q77 is None or np.max(np.abs(q77 - plan77.PARK)) < 5 else q77
     if move_to is not None:
         ph, info = plan77.plan_move(vial77, move_to, [o.tolist() for o in others77], API, WS.obstacles_for(WS.arms["77"]),
-                                    cup_xy=cup77, q_start=start77, name=name, target=vial)
+                                    cup_xy=cup77, q_start=start77, name=name, target=vial,
+                                    extra_obs=depth_obstacles(q77, vial77, cup77))
         total = time.perf_counter() - t0
         log(f"move planned in {info['t_total_s']:.2f} s: {info}")
         return {"trigger": f"{name} 옮기기", "title": f"{name} 옮기기 (시험)",
@@ -307,13 +326,15 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
     moved, ph_mv = None, None
     # The calibrated grasp depth first, then 3 mm shallower steps: at the reach edge the deeper hand puts J4 on the
     # board (2026-11-26, matcha vial at r 248: 13 mm none, 10 mm found). The inside check measures what is left.
+    dep_obs = depth_obstacles(q77, vial77, cup77)
     d0 = plan77.grasp_deeper_mm()
     depths = [d0] + [d for d in (d0 - 3.0, d0 - 6.0, d0 - 9.0) if d >= 0.0]
     try:
         for i, d in enumerate(depths):
             try:
                 ph77, info77 = plan77.plan_phase(vial77, cup77, [o.tolist() for o in others77], API, WS.obstacles_for(WS.arms["77"]),
-                                                 q_start=start77, grasp_test=(only == "grasp"), name=name, target=vial, deeper=d)
+                                                 q_start=start77, grasp_test=(only == "grasp"), name=name, target=vial, deeper=d,
+                                                 extra_obs=dep_obs)
                 if i:
                     log(f"grasp depth {d0:.0f} mm had no path; planned at {d:.0f} mm deeper")
                 break

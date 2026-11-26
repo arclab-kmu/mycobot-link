@@ -253,8 +253,8 @@ class Service:
     def _parse_obstacles(self, obs) -> list[dict]:
         if obs is None:
             return []
-        if not isinstance(obs, list) or len(obs) > 15:
-            raise BadRequest("obstacles must be a list of at most 15 boxes")
+        if not isinstance(obs, list) or len(obs) > 60:
+            raise BadRequest("obstacles must be a list of at most 60 boxes")
         out = []
         for i, o in enumerate(obs):
             try:

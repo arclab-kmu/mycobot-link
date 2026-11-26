@@ -35,7 +35,21 @@ import locate  # noqa: E402
 import plan77  # noqa: E402
 
 PAD_BACK = 10.0  # mm from the fingertips back to the pad centre (pads ~20 mm long)
-LAT_OK, ALONG_LO, ALONG_HI = 6.0, -6.0, 8.0  # cap offset from the pad centre that the fingers still wrap
+LAT_OK = 6.0  # sideways offset of the cap from the finger midline that the fingers still wrap
+# Along the approach: close only once the vial is INSIDE the TCP (Hojin 2026-11-26 night: "가루병을 잡을 때는 TCP
+# 안쪽에 위치시켰을 때 그리퍼를 닫아. 매번 그리퍼 앞 쪽에 두고 닫으니까 밀려났잖아"). The URDF TCP is 79 mm out of the
+# flange and the fingertips ~92, so "inside the TCP" is the vial axis ~20 mm behind the tips: HOLD_ALONG = -10 mm from
+# the pad centre (tips - 10), accepted within +-ALONG_TOL. The old window (-6..+8 around the pad centre) closed
+# with the vial at the fingertips. $MYCOBOT_LAB/cal77_grasp.json "hold_along_mm" overrides it.
+ALONG_TOL = 5.0
+
+
+def hold_along() -> float:
+    try:
+        return float(json.loads((locate.LAB / "cal77_grasp.json").read_text()).get("hold_along_mm", -10.0))
+    except (OSError, ValueError, AttributeError):
+        return -10.0
+
 # Larger readings are treated as bad measurements. Sideways up to 40 mm: on 2026-11-26 (vial at r 198) the vial stood
 # in front of the right finger, 29 mm off the midline (photo-confirmed), and the old 20 mm cap on the whole step stopped
 # a run that a sideways move would have fixed.
@@ -96,16 +110,17 @@ def measure(q, vial, approach, final=False, lateral_only=False):
     cap = cap_w - pad[:2]
     lat_mm = float(cap @ lat - mid)
     along_mm = float(cap @ ax - (tips - PAD_BACK))
-    inside = abs(lat_mm) <= LAT_OK and ALONG_LO <= along_mm <= ALONG_HI
+    target = hold_along()
+    inside = abs(lat_mm) <= LAT_OK and abs(along_mm - target) <= ALONG_TOL
     # Sideways only while the vial is not between the fingers: forward, a finger would meet the vial; back, a pad that
     # stands just ahead of the vial (2026-11-26: vial under the right finger's linkage, along -17 mm) would pull into
     # it. Sideways the finger slides past. The next look measures along with the vial between the fingers.
-    step_along = along_mm if abs(lat_mm) <= LAT_OK and not lateral_only else 0.0
+    step_along = (along_mm - target) if abs(lat_mm) <= LAT_OK and not lateral_only else 0.0
     dv = lat_mm * lat + step_along * ax
     out = {"lat_mm": round(lat_mm, 1), "along_mm": round(along_mm, 1), "inside": bool(inside),
            "err_mm": (-dv).round(2).tolist(),
-           "msg": f"병이 패드 중심에서 옆으로 {lat_mm:+.1f} mm, 앞으로 {along_mm:+.1f} mm"
-                  + (" (손가락 사이)" if inside else " (손가락 밖)")}
+           "msg": f"병이 패드 중심에서 옆으로 {lat_mm:+.1f} mm, 앞으로 {along_mm:+.1f} mm (목표 {target:+.0f}, TCP 안쪽)"
+                  + (" (손가락 사이)" if inside else " (아직 아님)")}
     # The joint change for this hand shift, by IK from where the arm is now (the console's -J err is linear and
     # was ~2x off next to the base, 2026-11-26: a 15 mm sideways fix moved the hand ~27 mm).
     import matcha_dyn  # noqa: E402 - arm_q() reads the console
