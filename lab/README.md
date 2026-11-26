@@ -19,5 +19,13 @@ Lab-specific files the console and the planner read, kept here so the set-up can
 The Jetsons' `~/mycobot-link` checkouts sit at `792ccde`; their `mycobot-arm` binaries were rebuilt on 2026-11-24
 from the `25a8d50` source (`--query-guard-ms`). Rebuild there after pulling if the arm server changes again.
 
+- `agx-vlm/`: the console's VLM since 2026-11-26, on the AGX Orin 64GB (`agx@192.168.0.72`, JetPack 6.2, no
+  docker, no sudo). vLLM 0.20 (jetson-ai-lab wheels) serves `cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4` as
+  `gemma-4-26b-a4b-it` on its 127.0.0.1:8100, the same name and port the Spark container used, so
+  `tools/console_up.sh` only tunnels to a different host (`VLM_SSH`, default the AGX). Files on the AGX live in
+  `~/gemma4-vllm/` (`install.sh` builds `.venv`, `serve.sh` starts the server, `gemma4-vllm.service` is the
+  systemd user unit with linger on, `logs/serve.log`); the weights are in `~/models/`. `install.sh` documents
+  each package that had to be added or pinned for the Jetson build; `triton_check.py` checks Triton alone.
+
 The cuRobo plan server, robot configs and meshes now live in `curobo/` of this repo (moved 2026-11-26);
 `tools/console_up.sh` starts it from there unless `$CUROBO` says otherwise.

@@ -114,7 +114,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                        "VLM action chunks executed as one QP stream")
     k.add_argument("--workspace", type=Path, required=True, help="cameras, arms, calibration (JSON)")
     k.add_argument("--http-port", type=int, default=8095)
-    k.add_argument("--vlm-url", default="http://127.0.0.1:8100/v1", help="OpenAI-compatible VLM (Spark via ssh -L)")
+    k.add_argument("--vlm-url", default="http://127.0.0.1:8100/v1", help="OpenAI-compatible VLM (AGX Orin via ssh -L)")
     k.add_argument("--vlm-model", default="gemma-4-26b-a4b-it")
     k.add_argument("--rate", type=float, default=20.0, help="QP / streaming rate, Hz")
     k.add_argument("--scenario", type=Path, action="append", default=[],

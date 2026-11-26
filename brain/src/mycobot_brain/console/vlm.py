@@ -23,8 +23,9 @@ from typing import Any
 
 from mycobot_brain.planner import PlannerError, chat
 
-#: Gemma 4 26B-A4B on the Spark (``gemma4-26b-a4b`` container, 127.0.0.1:8100
-#: there), reached from the workstation through ``ssh -L 8100:127.0.0.1:8100 spark``.
+#: Gemma 4 26B-A4B served by vLLM on the AGX Orin (``lab/agx-vlm/serve.sh``, 127.0.0.1:8100
+#: there; the Spark's ``gemma4-26b-a4b`` container until 2026-11-26), reached from the workstation
+#: through ``ssh -L 8100:127.0.0.1:8100 agx@192.168.0.72`` (``tools/console_up.sh``).
 DEFAULT_VLM_URL = "http://127.0.0.1:8100/v1"
 DEFAULT_VLM_MODEL = "gemma-4-26b-a4b-it"
 

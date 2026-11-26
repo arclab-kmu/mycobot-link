@@ -121,7 +121,7 @@ uv run mycobot-brain act "흰 테이프 롤이 화면 가운데 오게 해" --ex
 명령 칸 하나, 카메라 두 대의 RGB·Depth 네 칸, cuRobo 화면을 한 페이지(`http://127.0.0.1:8095`)에 모았습니다. 한 번의 명령은 이렇게 흐릅니다.
 
 ```text
-문장 + TOP/SIDE 프레임 → Spark VLM(Gemma 4 26B-A4B) → action chunk (point/move/home/grip/wait, 최대 6단계)
+문장 + TOP/SIDE 프레임 → VLM(Gemma 4 26B-A4B, AGX Orin) → action chunk (point/move/home/grip/wait, 최대 6단계)
   → workspace: 픽셀 + 정렬 depth → 세계 좌표 mm, 안전 상자
   → cuRobo: 큰 이동은 충돌 없는 관절 경로 (depth로 만든 물체 상자 포함), 모든 chunk는 /check로 링크 충돌 검사
   → mycobot_control.qp ChunkExecutor @ 20 Hz → 팔 서버 (마지막 검사는 여전히 팔 서버)
@@ -130,7 +130,7 @@ uv run mycobot-brain act "흰 테이프 롤이 화면 가운데 오게 해" --ex
 예전 `act`는 VLM 한 번에 5° 한 걸음을 받고 멈춘 뒤 다시 보았습니다. 콘솔은 VLM 한 번에 여러 단계(chunk)를 받아 하나의 연속 동작으로 흘려보냅니다. 단계 사이에서 멈추지 않고, 새 chunk는 지금 명령 위치·속도에서 이어 붙습니다.
 
 ```bash
-tools/console_up.sh        # 카메라 뷰어 + 터널(8090, 8092), Spark VLM 터널(8100), cuRobo 서버(8096/8080), 콘솔
+tools/console_up.sh        # 카메라 뷰어 + 터널(8090, 8092), AGX VLM 터널(8100), cuRobo 서버(8096/8080), 콘솔
 # 팔은 따로, 명시적으로 켭니다 (워크스테이션 PC 쪽 포트 30977 = .77 팔, 30978 = .70 팔)
 ssh -R 47900:127.0.0.1:30977 er@192.168.0.77 \
   '~/mycobot-link/arm-server/target/release/mycobot-arm --brain 127.0.0.1:47900 --live --assume-yes --max-speed 100 --reply-timeout-ms 100'

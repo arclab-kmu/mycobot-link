@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Bring up everything the web console needs, from the workstation, in one go:
 #   camera viewers on both Jetsons + tunnels (8090 top, 8092 side),
-#   the Spark VLM tunnel (8100), the cuRobo plan server (8096 API, 8080 view),
+#   the VLM tunnel (8100, Gemma 4 on the AGX Orin; VLM_SSH=spark for the old host),
+#   the cuRobo plan server (8096 API, 8080 view),
 #   and the console itself (http://127.0.0.1:8095).
 # Arm servers are NOT started here: moving hardware stays a separate, explicit step
 # (see README "웹 콘솔"). Ctrl-C stops what this script started.
@@ -11,6 +12,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WS="${1:-$HOME/Documents/lab-jetson/console/workspace.json}"
 CUROBO="${CUROBO:-$HERE/curobo}"
+VLM_SSH="${VLM_SSH:-agx@192.168.0.72}"   # vLLM gemma-4-26b-a4b-it on 127.0.0.1:8100 there (lab/agx-vlm/)
 export SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-/run/user/$(id -u)/gcr/ssh}"
 SSH=(ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o LogLevel=ERROR)
 pids=()
@@ -22,7 +24,7 @@ trap cleanup EXIT INT TERM
 port_free() { ! ss -ltn "sport = :$1" | grep -q LISTEN; }
 port_free 8090 && { "${SSH[@]}" -p 22022 -N -L 8090:127.0.0.1:8090 er@192.168.0.70 & pids+=($!); }
 port_free 8092 && { "${SSH[@]}" -N -L 8092:127.0.0.1:8090 er@192.168.0.77 & pids+=($!); }
-port_free 8100 && { "${SSH[@]}" -N -L 8100:127.0.0.1:8100 spark & pids+=($!); }
+port_free 8100 && { "${SSH[@]}" -N -L 8100:127.0.0.1:8100 "$VLM_SSH" & pids+=($!); }
 if port_free 8096; then
   "$CUROBO/scripts/run.sh" server > /tmp/curobo-plan-server.log 2>&1 & pids+=($!)
   echo "cuRobo warming up (about 60 s; log /tmp/curobo-plan-server.log)"

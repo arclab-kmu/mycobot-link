@@ -1,0 +1,17 @@
+# systemd --user unit on the AGX Orin: ~/.config/systemd/user/gemma4-vllm.service
+#   systemctl --user daemon-reload && systemctl --user enable --now gemma4-vllm
+#   systemctl --user status gemma4-vllm ; tail -f ~/gemma4-vllm/logs/serve.log
+# `loginctl enable-linger agx` (it worked without sudo on 2026-11-26) lets it start at boot without a login.
+[Unit]
+Description=Gemma 4 26B-A4B on vLLM (OpenAI API 127.0.0.1:8100) for the myCobot console
+After=network-online.target
+
+[Service]
+ExecStart=%h/gemma4-vllm/serve.sh
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:%h/gemma4-vllm/logs/serve.log
+StandardError=append:%h/gemma4-vllm/logs/serve.log
+
+[Install]
+WantedBy=default.target
