@@ -88,6 +88,19 @@ def cmd_plan(args):
     scene = plan77.Scene(cup, 286.0 + 25.0, 40.0 + 25.0, [[o[0], o[1], 262.5 + 25.0] for o in others])
     obs = (ws.obstacles_for(ws.arms["77"]) + plan77.cup_boxes(cup, 286.0 + 25.0, 40.0 + 25.0) +
            [plan77.box(f"vial{i}", o[0], o[1], 197.0, 300.0, 80, 80) for i, o in enumerate(others)])[:15]
+    if args.keepout:
+        # Objects stay on the table but the map that would place them is what this run measures (2026-11-26 night,
+        # Hojin: "지금 상태에서 진행해 봐 ... 병 넘어트리지마"). Distances from the .77 axis do not depend on the
+        # unknown yaw, and every object stood >= ~135 mm from it (vials 145, cup 264, depth heights 67-83 mm). So the
+        # arm is kept above table + H everywhere beyond an octagon of apothem R around its axis (4 boxes); inside it
+        # (where the upper arm rises past the table edge) it may go lower.
+        r_in, h = args.keepout
+        obs = obs[:11]
+        for k, ang in enumerate((0, 45, 90, -45)):
+            a = math.radians(ang)
+            c = r_in + 350.0
+            obs.append(plan77.box(f"keepout{k}", c * math.cos(a), c * math.sin(a), plan77.TABLE, plan77.TABLE + h,
+                                  700.0, 1400.0, ang))
     spots = []
     grid = [(x, y) for y in range(-220, 61, 40) for x in (range(100, 241, 35) if (y // 40) % 2 else range(240, 99, -35))]
     if args.ring:
@@ -98,18 +111,26 @@ def cmd_plan(args):
         grid = [(r * math.cos(math.radians(b)), r * math.sin(math.radians(b)))
                 for i, r in enumerate((r_in, (r_in + r_out) / 2, r_out))
                 for b in (range(-70, 71, 20) if i % 2 == 0 else range(70, -71, -20))]
+    if args.polar:  # radii x bearings (deg) of the .77 frame, nearest ring first
+        b0, b1, db = args.bearings
+        grid = []
+        for i, r in enumerate(args.polar):
+            bs = list(np.arange(b0, b1 + 0.1, db))
+            grid += [(r * math.cos(math.radians(b)), r * math.sin(math.radians(b))) for b in (bs if i % 2 == 0 else bs[::-1])]
     if args.box:  # a rectangle of the .77 frame known to be over the table and away from fixtures
         x0, x1, y0, y1 = args.box
         xs, ys = np.linspace(x0, x1, 4), np.linspace(y0, y1, 4)
         grid = [(float(x), float(y)) for j, y in enumerate(ys) for x in (xs if j % 2 == 0 else xs[::-1])]
     for k, (x, y) in enumerate(grid):
         heights = (300.0, 330.0, 360.0) if k % 2 == 0 else (360.0, 330.0, 300.0)
+        if args.heights:
+            heights = tuple(args.heights) if k % 2 == 0 else tuple(args.heights[::-1])
         for z in heights:
             q = hover_pose([x, y], z, scene, api, obs)
             if q is not None:
                 spots.append((x, y, z, q))
                 break
-        if len(spots) >= 14:
+        if len(spots) >= args.max_spots:
             break
     if len(spots) < 6:
         raise SystemExit(f"only {len(spots)} reachable hover spots")
@@ -351,6 +372,12 @@ if __name__ == "__main__":
     p.add_argument("--ring", type=float, nargs=2, metavar=("R_IN", "R_OUT"),
                    help="hover on three rings between these radii (mm) at bearings -70..70 instead of the grid")
     p.add_argument("--end-here", action="store_true", help="return to the start pose instead of PARK")
+    p.add_argument("--keepout", type=float, nargs=2, metavar=("R_MM", "H_MM"),
+                   help="objects left in place: keep the arm above table + H beyond R mm from the .77 axis")
+    p.add_argument("--polar", type=float, nargs="+", metavar="R", help="hover radii (mm), with --bearings")
+    p.add_argument("--bearings", type=float, nargs=3, default=[-20.0, 70.0, 15.0], metavar=("FROM", "TO", "STEP"))
+    p.add_argument("--max-spots", type=int, default=14)
+    p.add_argument("--heights", type=float, nargs="+", help="pad heights (planner z, table 197) to try per spot")
     p.add_argument("--box", type=float, nargs=4, metavar=("X0", "X1", "Y0", "Y1"),
                    help="hover on a 4 x 4 grid over this rectangle of the .77 frame (mm) instead of the default grid")
     p = sp.add_parser("snap")

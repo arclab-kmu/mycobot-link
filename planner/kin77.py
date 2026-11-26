@@ -5,7 +5,7 @@ templates, TABLE, the cap / rim heights, the hover and pour heights, the camera 
 exhibit setup moved rooms and the .77 may stand at another height under the table. Instead of editing every height,
 the planner keeps its frame glued to the table: this module's fk() reports z - BASE_DZ, where
 BASE_DZ = (table top in the real .77 base frame) - 197, from MYCOBOT_TABLE_Z or $MYCOBOT_LAB/workspace.json
-"table_z_mm". A point 40 mm above the table is then z 237 here, whatever the room. Joint angles are frame-free;
+"table_z_77_mm" (else "table_z_mm"). A point 40 mm above the table is then z 237 here, whatever the room. Joint angles are frame-free;
 only cuRobo obstacles go back to the real base frame (plan77.box adds BASE_DZ) and so do CUDA IK targets.
 
 The .70 planner (s70/) keeps using kin directly: its base pose is its own.
@@ -30,7 +30,10 @@ def _base_dz() -> float:
         return float(v) - TAUGHT_TABLE_Z
     p = Path(os.environ.get("MYCOBOT_LAB", "~/Documents/lab-jetson/console")).expanduser() / "workspace.json"
     try:
-        return float(json.loads(p.read_text()).get("table_z_mm", TAUGHT_TABLE_Z)) - TAUGHT_TABLE_Z
+        cfg = json.loads(p.read_text())
+        # "table_z_77_mm": the table top in the .77 base frame. "table_z_mm" is the camera world's table (the console's
+        # depth heightmap uses it), which in the 2026-11-26 room stayed 197.5 while the .77 moved to 222 below it.
+        return float(cfg.get("table_z_77_mm", cfg.get("table_z_mm", TAUGHT_TABLE_Z))) - TAUGHT_TABLE_Z
     except (OSError, ValueError):
         return 0.0
 

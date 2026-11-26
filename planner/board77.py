@@ -111,7 +111,7 @@ def main() -> int:
         return 1
     ws_path = locate.lab_file("workspace.json")
     ws = json.loads(Path(ws_path).read_text())
-    table_z = float(ws.get("table_z_mm", 197.0))
+    table_z = float(ws.get("table_z_77_mm", ws.get("table_z_mm", 197.0)))  # the table in the .77 base frame
     c = r["foot"] + r["n"] * DIMS[0] / 2
     yaw = math.degrees(math.atan2(r["n"][1], r["n"][0]))
     board = {"name": "board", "center_mm": [round(float(c[0]), 1), round(float(c[1]), 1), round(table_z - DIMS[2] / 2, 1)],
