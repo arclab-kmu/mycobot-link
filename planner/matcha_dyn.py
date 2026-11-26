@@ -86,7 +86,8 @@ def arm_world(arm, q, extra):
     s = _spheres(q).copy()
     if arm == "77":
         s[:, 2] -= kin.BASE_DZ  # spheres come in the real base frame; the .77's world here is table-referenced
-    T = kin.fk(np.asarray(q, float))
+    # the spoon/tool spheres ride on the same frame as the arm spheres: table-referenced for the .77, raw for the .70
+    T = kin.fk(np.asarray(q, float)) if arm == "77" else kin.fk_taught(np.asarray(q, float))
     if extra:
         s = np.vstack([s, [np.r_[T[:3, :3] @ p + T[:3, 3], r] for p, r in extra]])
     c = world77(s[:, :3]) if arm == "77" else world70(s[:, :3])
