@@ -78,10 +78,13 @@ def cmd_plan(args):
     api = ws.curobo_api
     # keep well clear of the cup and the vials: their positions are only as good as the map being fixed here
     import matcha_dyn
-    _, d = matcha_dyn.measure()
-    cup = locate.to77(locate.at(d["cup"]["u"], d["cup"]["v"], locate.RIM_Z)).tolist()
-    caps = ([d["matcha"]] if d["matcha"] else []) + d["others"]
-    others = [locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z)).tolist() for c in caps]
+    if args.clear:  # a new room: the old map cannot place the cup or vials, so the table must be empty
+        cup, others = [2000.0, 2000.0], []
+    else:
+        _, d = matcha_dyn.measure()
+        cup = locate.to77(locate.at(d["cup"]["u"], d["cup"]["v"], locate.RIM_Z)).tolist()
+        caps = ([d["matcha"]] if d["matcha"] else []) + d["others"]
+        others = [locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z)).tolist() for c in caps]
     scene = plan77.Scene(cup, 286.0 + 25.0, 40.0 + 25.0, [[o[0], o[1], 262.5 + 25.0] for o in others])
     obs = (ws.obstacles_for(ws.arms["77"]) + plan77.cup_boxes(cup, 286.0 + 25.0, 40.0 + 25.0) +
            [plan77.box(f"vial{i}", o[0], o[1], 197.0, 300.0, 80, 80) for i, o in enumerate(others)])[:15]
@@ -107,7 +110,7 @@ def cmd_plan(args):
     for i in range(1, len(seq)):
         path = plan77.thin(plan77.cu_plan(api, seq[i - 1], seq[i], obs))
         segs.append({"kind": "joints", "label": f"자리 {i}" if i < len(seq) - 1 else "park",
-                     "q": np.round(plan77.timed([(path, 45.0)]), 3).tolist(), "dt": 0.05})
+                     "q": np.round(plan77.timed([(path, args.speed)]), 3).tolist(), "dt": 0.05})
         if i < len(seq) - 1:
             segs += [{"kind": "grip", "label": "열기", "value": 100},
                      {"kind": "wait", "label": "멈춤", "seconds": 0.6},
@@ -132,6 +135,15 @@ def cmd_plan(args):
 def cmd_snap(args):
     SNAPS.mkdir(parents=True, exist_ok=True)
     time.sleep(0.2)
+    t0 = time.time()  # only a fresh frame (the top viewer lagged 0.5-5 s per photo on 2026-11-26)
+    while time.time() - t0 < 3.0:
+        try:
+            age = json.loads(urllib.request.urlopen("http://127.0.0.1:8090/stats", timeout=2).read()).get("color", {}).get("age_s")
+            if age is not None and age < 0.3:
+                break
+        except Exception:  # noqa: BLE001 - an older viewer without /stats
+            break
+        time.sleep(0.1)
     err = None
     for _ in range(4):
         try:
@@ -161,7 +173,20 @@ def _centroids(win_px=120.0, min_n=30):
         T = kin.fk(np.array(m["q"]))
         guess = project(Rc, tc, T[:3, :3] @ plan77.TLV + T[:3, 3])[0]
         vv, uu = np.mgrid[0:d.shape[0], 0:d.shape[1]]
-        win = np.hypot(uu - guess[0], vv - guess[1]) < win_px
+        if win_px:
+            win = np.hypot(uu - guess[0], vv - guess[1]) < win_px
+        else:  # no usable guess (new room): start at the median of every changed pixel, then shift a 120 px window
+            ch = d > 35
+            ch[:8], ch[-8:], ch[:, :8], ch[:, -8:] = False, False, False, False
+            if ch.sum() < min_n:
+                continue
+            c = np.array([np.median(uu[ch]), np.median(vv[ch])])
+            for _ in range(4):
+                win = np.hypot(uu - c[0], vv - c[1]) < 120
+                if (ch & win).sum() < min_n:
+                    break
+                c = np.array([np.median(uu[ch & win]), np.median(vv[ch & win])])
+            win = np.hypot(uu - c[0], vv - c[1]) < 120
         mask = (d > 35) & win
         if mask.sum() < min_n:
             continue
@@ -307,11 +332,14 @@ if __name__ == "__main__":
     sp = ap.add_subparsers(dest="cmd", required=True)
     p = sp.add_parser("plan")
     p.add_argument("--scene", help="json with cup77 and vials77 (to keep the hover spots clear of them)")
+    p.add_argument("--clear", action="store_true", help="the table is empty: do not measure the cup and vials")
+    p.add_argument("--speed", type=float, default=45.0, help="deg/s between spots (30 in a new room)")
     p = sp.add_parser("snap")
     p.add_argument("name")
     sp.add_parser("fit")
     p = sp.add_parser("fit2d")
-    p.add_argument("--win", type=float, default=220.0, help="search radius (px) around the old map's guess")
+    p.add_argument("--win", type=float, default=0.0,
+                   help="search radius (px) around the old map's guess; 0 = whole image (a new room)")
     p.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     {"plan": cmd_plan, "snap": cmd_snap, "fit": cmd_fit, "fit2d": cmd_fit2d}[a.cmd](a)
