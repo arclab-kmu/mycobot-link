@@ -118,6 +118,13 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.cmd == "snap":
         align.snap(a.name)
+        # the side camera (D405 on the .77) too: it sees the fingers and the vial from the side, along the approach
+        import urllib.request
+        for ext, url in (("jpg", "http://127.0.0.1:8092/color.jpg"), ("png", "http://127.0.0.1:8092/depth.png")):
+            try:
+                (align.DIR / f"side_{a.name}.{ext}").write_bytes(urllib.request.urlopen(url, timeout=5).read())
+            except Exception:  # noqa: BLE001 - the side view is extra evidence, not required
+                pass
     else:
         out, code = measure(a.q, a.vial, a.approach, a.final)
         (align.DIR / "inside_last.json").write_text(json.dumps(out, ensure_ascii=False))

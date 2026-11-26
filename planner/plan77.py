@@ -560,10 +560,17 @@ def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha
             {"kind": "align", "label": "병이 손가락 사이에 있는지(위 카메라)", "J": np.round(J, 4).tolist(),
              "max_err_mm": 22, "apply": True, "cmd": meas},
             {"kind": "joints", "label": "병 쪽으로 맞추기", "q": hold(20), "dt": 0.05, "offset": "in", "ramp": 20},
+            # A second correction before the final look: with the vial off to one side the fingertip estimate is
+            # poor; once it sits between the fingers the along-the-fingers reading is right (side camera,
+            # 2026-11-26: pass 1 read +4 mm along, pass 2 +12.5 mm, and the side view showed the tips ~12 mm short).
             *look(" 다시"),
-            {"kind": "align", "label": "손가락 사이인지 다시 확인", "J": np.round(J, 4).tolist(),
+            {"kind": "align", "label": "다시 재고 맞추기", "J": np.round(J, 4).tolist(),
+             "max_err_mm": 22, "apply": True, "cmd": meas},
+            {"kind": "joints", "label": "병 쪽으로 더 맞추기", "q": hold(16), "dt": 0.05, "offset": "in", "ramp": 16},
+            *look(" 마지막"),
+            {"kind": "align", "label": "손가락 사이인지 마지막 확인", "J": np.round(J, 4).tolist(),
              "max_err_mm": 12, "apply": True, "cmd": [*meas, "--final"]},
-            {"kind": "joints", "label": "마지막 맞추기", "q": hold(14), "dt": 0.05, "offset": "in", "ramp": 14},
+            {"kind": "joints", "label": "마지막 맞추기", "q": hold(12), "dt": 0.05, "offset": "in", "ramp": 12},
             {"kind": "grip", "label": "잡기", "value": GRIP_CLOSE},
             {"kind": "wait", "label": "잡는 중", "seconds": 1.5},
             # 2026-11-26: a run lifted an empty hand and poured air; the camera check after the lift passed because

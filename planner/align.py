@@ -32,6 +32,18 @@ FINGER_POINT = np.array([13.1, 6.2, 87.3])  # flange frame: centre of the open/c
 def snap(name):
     DIR.mkdir(parents=True, exist_ok=True)
     time.sleep(0.2)
+    # Only a fresh frame: on 2026-11-26 the top viewer lagged (0.5-5 s per photo) and two snaps 2.5 s apart came
+    # back identical (0 px changed). Wait until its colour frame is younger than 0.3 s (up to 3 s).
+    t0 = time.time()
+    while time.time() - t0 < 3.0:
+        try:
+            st = json.loads(urllib.request.urlopen("http://127.0.0.1:8090/stats", timeout=2).read())
+            age = st.get("color", {}).get("age_s")
+            if age is not None and age < 0.3:
+                break
+        except Exception:  # noqa: BLE001 - an older viewer without /stats: just take the photo
+            break
+        time.sleep(0.1)
     for _ in range(4):
         try:
             (DIR / f"{name}.jpg").write_bytes(urllib.request.urlopen("http://127.0.0.1:8090/color.jpg", timeout=5).read())
