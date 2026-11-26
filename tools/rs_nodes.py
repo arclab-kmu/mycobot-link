@@ -18,6 +18,9 @@ import subprocess
 import sys
 
 ROLE = {"435": "TOP", "405": "SIDE"}  # product name contains "Depth Camera 435i" / "Depth Camera 405"
+# mm per raw Z16 count. The D405 ships with 100 um depth units; on the AGX (plain V4L2, 2026-11-27) its raw values were
+# 10x the distance in mm (vial ~160 mm -> ~1600). The D435i is 1 mm.
+UNIT = {"TOP": 1.0, "SIDE": 0.1}
 
 
 def _read(d: str, f: str) -> str:
@@ -69,6 +72,7 @@ def main() -> int:
             if r and c["depth"] and c["color"]:
                 print(f': "${{{r}_DEPTH:={c["depth"]}}}"')
                 print(f': "${{{r}_COLOR:={c["color"]}}}"')
+                print(f': "${{{r}_DEPTH_UNIT:={UNIT.get(r, 1.0)}}}"')
         return 0
     if not cams:
         print("RealSense 카메라가 없어요 (USB 연결, v4l2-ctl 설치 확인)")

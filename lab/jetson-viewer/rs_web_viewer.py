@@ -95,15 +95,20 @@ class V4L2Stream(threading.Thread):
 
 
 class Viewer:
-    def __init__(self, color, depth, near_mm, far_mm, quality):
+    def __init__(self, color, depth, near_mm, far_mm, quality, depth_unit=1.0):
         self.color, self.depth = color, depth
+        self.depth_unit = depth_unit  # mm per raw Z16 count (D435i 1.0; D405 0.1 by default)
         self.near, self.far = near_mm, far_mm
         self.quality = quality
         self.lock = threading.Lock()
         self.cache = {}  # key -> (cache_key, jpeg)
 
     def depth_array(self, raw):
-        return np.frombuffer(raw, dtype="<u2").reshape(self.depth.h, self.depth.w)
+        """Depth in mm (uint16) whatever the camera's unit: every endpoint (colormap, depth.png, depth_at) reads this."""
+        d = np.frombuffer(raw, dtype="<u2").reshape(self.depth.h, self.depth.w)
+        if self.depth_unit != 1.0:
+            d = np.round(d * self.depth_unit).astype(np.uint16)
+        return d
 
     def render(self, which, raw):
         if which == "color":
@@ -290,7 +295,7 @@ def make_handler(viewer, max_fps):
                 self._json({"x": x, "y": y, "mm": mm})
             elif path == "/stats":
                 self._json({"color": viewer.color.stats(), "depth": viewer.depth.stats(),
-                            "near_mm": viewer.near, "far_mm": viewer.far})
+                            "near_mm": viewer.near, "far_mm": viewer.far, "depth_unit_mm": viewer.depth_unit})
             elif path == "/set":
                 try:
                     near = float(q.get("near", [viewer.near])[0])
@@ -320,12 +325,15 @@ def main():
     ap.add_argument("--near", type=float, default=0.20, help="depth colormap near [m]")
     ap.add_argument("--far", type=float, default=1.50, help="depth colormap far [m]")
     ap.add_argument("--quality", type=int, default=80)
+    ap.add_argument("--depth-unit", type=float, default=1.0,
+                    help="mm per raw Z16 count: 1.0 for the D435i, 0.1 for the D405 (its default unit is 100 um, and "
+                         "plain V4L2 cannot change it); depth.png and depth_at are always in mm")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     color = V4L2Stream("color", args.color_dev, "YUYV", args.width, args.height, args.fps, 2)
     depth = V4L2Stream("depth", args.depth_dev, "Z16 ", args.width, args.height, args.fps, 2)
-    viewer = Viewer(color, depth, args.near * 1000, args.far * 1000, args.quality)
+    viewer = Viewer(color, depth, args.near * 1000, args.far * 1000, args.quality, args.depth_unit)
     color.start()
     depth.start()
 

@@ -355,28 +355,35 @@ def cmd_fit2d(args):
         print(msg + ": 잔차가 크거나 자리가 적어 지도를 바꾸지 않아요")
         sys.exit(1)
     if not args.dry_run:
-        p = locate.LAB / "cal77.json"
-        if p.exists():
-            p.rename(p.with_name(f"cal77.before-{time.strftime('%Y%m%d-%H%M')}.json"))
-        p.write_text(json.dumps(out, indent=1))
-        msg += f" -> {p}"
-        # the console places world-frame things (depth heightmap, world boxes) with workspace.json's .77 pose: make it
-        # the same map. base -> world: xy = R2^T (p - T); z: camera world = planner frame = real .77 z - BASE_DZ
-        pw = locate.LAB / "workspace.json"
-        if pw.exists():
-            ws_cfg = json.loads(pw.read_text())
-            a77 = ws_cfg.get("arms", {}).get("77")
-            if a77 is not None:
-                Rb = np.eye(3)
-                Rb[:2, :2] = R2.T
-                a77["R_base"] = Rb.round(8).tolist()
-                a77["origin_mm"] = [*np.round(R2.T @ (-t2), 2).tolist(), round(-kin.BASE_DZ, 2)]
-                a77["yaw_deg"] = 0.0
-                a77["_cal"] = f"cal77.py fit2d {time.strftime('%Y-%m-%d %H:%M')} (same map as cal77.json)"
-                pw.rename(pw.with_name(f"workspace.before-cal77-{time.strftime('%Y%m%d-%H%M')}.json"))
-                pw.write_text(json.dumps(ws_cfg, indent=1, ensure_ascii=False))
-                msg += " (workspace.json .77 pose too; restart the console)"
+        msg += save_map(out, R2, t2, "cal77.py fit2d")
     print(msg)
+
+
+def save_map(out: dict, R2, t2, who: str = "cal77.py fit2d") -> str:
+    """Write the camera-world -> .77 map to cal77.json and the same .77 pose into workspace.json (old files kept)."""
+    R2, t2 = np.asarray(R2, float), np.asarray(t2, float)
+    p = locate.LAB / "cal77.json"
+    if p.exists():
+        p.rename(p.with_name(f"cal77.before-{time.strftime('%Y%m%d-%H%M')}.json"))
+    p.write_text(json.dumps(out, indent=1))
+    msg = f" -> {p}"
+    # the console places world-frame things (depth heightmap, world boxes) with workspace.json's .77 pose: make it
+    # the same map. base -> world: xy = R2^T (p - T); z: camera world = planner frame = real .77 z - BASE_DZ
+    pw = locate.LAB / "workspace.json"
+    if pw.exists():
+        ws_cfg = json.loads(pw.read_text())
+        a77 = ws_cfg.get("arms", {}).get("77")
+        if a77 is not None:
+            Rb = np.eye(3)
+            Rb[:2, :2] = R2.T
+            a77["R_base"] = Rb.round(8).tolist()
+            a77["origin_mm"] = [*np.round(R2.T @ (-t2), 2).tolist(), round(-kin.BASE_DZ, 2)]
+            a77["yaw_deg"] = 0.0
+            a77["_cal"] = f"{who} {time.strftime('%Y-%m-%d %H:%M')} (same map as cal77.json)"
+            pw.rename(pw.with_name(f"workspace.before-cal77-{time.strftime('%Y%m%d-%H%M')}.json"))
+            pw.write_text(json.dumps(ws_cfg, indent=1, ensure_ascii=False))
+            msg += " (workspace.json .77 pose too; restart the console)"
+    return msg
 
 
 def ray77(cal, u, v, z):

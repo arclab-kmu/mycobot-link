@@ -29,6 +29,11 @@ def lab_file(name: str) -> Path:
 
 
 CAM = workspace.load(str(lab_file("workspace.before-recal-20261124.json"))).cameras["top"]
+# 2026-11-27: the top camera was re-aimed in the exhibit room. recam.py pose writes its new pose (same intrinsics) here.
+_TOPCAM = LAB / "topcam.json"
+if _TOPCAM.exists():
+    _p = json.loads(_TOPCAM.read_text())
+    CAM.R, CAM.t = np.array(_p["R"], float), np.array(_p["t"], float)
 CAP_Z, RIM_Z = 264.0, 286.0
 
 

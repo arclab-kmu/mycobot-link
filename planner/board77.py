@@ -80,7 +80,7 @@ def fit(depth_png: bytes):
             best = inl
     keep = best
     p0 = P[keep].mean(0)
-    _, _, Vt = np.linalg.svd(P[keep] - p0)
+    _, _, Vt = np.linalg.svd(P[keep] - p0, full_matrices=False)
     t = Vt[0]
     n = np.array([-t[1], t[0]])
     rms = float(np.sqrt(np.mean(((P[keep] - p0) @ n) ** 2)))

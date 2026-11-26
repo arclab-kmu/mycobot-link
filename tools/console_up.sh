@@ -16,7 +16,7 @@
 #
 # Since 2026-11-27 both cameras plug into the AGX itself. TOP_SSH=local / SIDE_SSH=local run the same viewer here on
 # 8090 / 8092 (no Jetson, no tunnel); tools/rs_nodes.py picks the nodes by USB product (D435i top, D405 side), or set
-# TOP_DEPTH/TOP_COLOR/SIDE_DEPTH/SIDE_COLOR yourself:
+# TOP_DEPTH/TOP_COLOR/SIDE_DEPTH/SIDE_COLOR yourself (and *_DEPTH_UNIT, mm per raw count: D405 0.1, D435i 1.0):
 #   TOP_SSH=local SIDE_SSH=local MYCOBOT_LAB=~/Documents/lab-jetson/console tools/console_up.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,13 +37,13 @@ camera() {  # ROLE HOST PORT LOCAL_PORT: a viewer on that Jetson + a tunnel, or 
   if [ "$host" = local ]; then
     port_free "$lp" || { echo "$role camera: $lp already listening, kept"; return 0; }
     eval "$(python3 "$HERE/tools/rs_nodes.py" env)"
-    local dv="${role}_DEPTH" cv="${role}_COLOR"
+    local dv="${role}_DEPTH" cv="${role}_COLOR" uv="${role}_DEPTH_UNIT"
     if [ -z "${!dv:-}" ] || [ -z "${!cv:-}" ]; then
       echo "$role camera: no RealSense nodes found here (tools/rs_nodes.py)"; return 1
     fi
     python3 "$HERE/lab/jetson-viewer/rs_web_viewer.py" --port "$lp" --depth-dev "${!dv}" --color-dev "${!cv}" \
-      > "/tmp/rs-viewer-$lp.log" 2>&1 & pids+=($!)
-    echo "$role camera: viewer here on $lp (depth ${!dv}, color ${!cv}; log /tmp/rs-viewer-$lp.log)"
+      --depth-unit "${!uv:-1.0}" > "/tmp/rs-viewer-$lp.log" 2>&1 & pids+=($!)
+    echo "$role camera: viewer here on $lp (depth ${!dv} x ${!uv:-1.0} mm, color ${!cv}; log /tmp/rs-viewer-$lp.log)"
   else
     "${SSH[@]}" -p "$port" "$host" '~/rs_web_viewer/start.sh' >/dev/null
     port_free "$lp" && { "${SSH[@]}" -p "$port" -N -L "$lp:127.0.0.1:8090" "$host" & pids+=($!); }
