@@ -340,9 +340,26 @@ def pitch_local(pitch):
     return C
 
 
-def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=(), only=None, pitches=(0.0, 5.0, 8.0, 12.0)):
+def grasp_deeper_mm() -> float:
+    """How much deeper (along the template approach) the vial really sits in the hand than the template says, from
+    LAB/cal77_grasp.json {"deeper_mm": d}. 2026-11-26: a hand-guided grasp put the vial axis 13.6 mm (vial position
+    before the demo) to 21 mm (after) deeper along the tool axis than the template's vial point, and the one
+    grasp that worked that day had been shifted 12 mm outward; without it the fingertips closed on the near edge."""
+    import os
+    p = Path(os.environ.get("MYCOBOT_LAB", "~/Documents/lab-jetson/console")).expanduser() / "cal77_grasp.json"
+    try:
+        return float(json.loads(p.read_text()).get("deeper_mm", 0.0)) if p.exists() else 0.0
+    except (ValueError, OSError):
+        return 0.0
+
+
+def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=(), only=None, pitches=(0.0, 5.0, 8.0, 12.0),
+               deeper=None):
     G = TPL["grasp"]
     V0 = np.array(G["vial_xy"])
+    deeper = grasp_deeper_mm() if deeper is None else deeper
+    if deeper:  # the template's vial really stood this much nearer the hand, along its approach
+        V0 = V0 - deeper * _template_frames()[1]
     V = np.asarray(vial_xy, float)
     dth = bearing(V) - bearing(V0)
     V0r = (Rz(dth) @ np.r_[V0, 0])[:2]
@@ -392,7 +409,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
                 why.append(f"{tag}: cuRobo {chk.get('detail', {}).get('obstacles') or chk.get('detail')}")
                 continue
         return dict(qa=qa, sub=sub, q=qg, lift=lift, spin=spin, dz=dz, shallow=shallow, pitch=pitch, key=(pitch, dz, shallow, spin),
-                    d_theta=dth, pad=pad_pt(qg), vial=vial_pt(qg), a_dir=a_dir)
+                    d_theta=dth, pad=pad_pt(qg), vial=vial_pt(qg), a_dir=a_dir, deeper=float(deeper))
     raise PlanError("no grasp: " + "; ".join(why[:12]) + (f" (+{len(why) - 12} more)" if len(why) > 12 else ""))
 
 
@@ -554,7 +571,11 @@ def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha
     # Hojin 2026-11-26: "그리퍼 내부에 들어오면 오므리자". At the planned grasp pose, look where the vial is relative
     # to the pads, move by that, look again, and close only if the vial is between the fingers; otherwise stop
     # without closing (closing on the vial's near edge had pushed it away three times that day).
-    segs = [{"kind": "joints", "label": label, "q": R(a1), "dt": 0.05},
+    # Open first: 2026-11-26 the gripper was still closed from a hand-guided demo, so the "open" photo showed closed
+    # fingers and opening them at the grasp pose swung a pad into the vial (pushed ~13 mm).
+    segs = [{"kind": "grip", "label": "그리퍼 열기", "value": 100},
+            {"kind": "wait", "label": "여는 중", "seconds": 1.0},
+            {"kind": "joints", "label": label, "q": R(a1), "dt": 0.05},
             {"kind": "joints", "label": "마지막 접근", "q": R(a2), "dt": 0.05},
             *look(""),
             {"kind": "align", "label": "병이 손가락 사이에 있는지(위 카메라)", "J": np.round(J, 4).tolist(),
@@ -594,8 +615,11 @@ def lift_check(g, target="matcha"):
 
 
 def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40.0, place_comp_mm=3.8, q_start=None,
-               grasp_test=False, name="말차 병", target="matcha"):
-    """Returns (phase dict for the console scenario, info). ``others`` = [(x, y, top_z)] of the other vials."""
+               grasp_test=False, name="말차 병", target="matcha", deeper=None):
+    """Returns (phase dict for the console scenario, info). ``others`` = [(x, y, top_z)] of the other vials.
+    ``deeper``: grasp depth correction (mm) instead of LAB/cal77_grasp.json's (the caller steps it down at the reach
+    edge). A grasp test pours nothing, so its hand may tip like a move (MOVE_PITCHES): 2026-11-26 the matcha vial at
+    r 248 had no grasp within 12 deg at any depth, and one at 10 mm deeper within 25 deg."""
     t0 = time.perf_counter()
     sc = Scene(cup_xy, rim_z, cup_r, others)
     obs = list(ws_obstacles) + cup_boxes(cup_xy, rim_z, cup_r) + [box(f"vial{i}", o[0], o[1], TABLE, o[2] + 3, OTHER_VIAL_MM, OTHER_VIAL_MM)
@@ -603,7 +627,8 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     obs = obs[:15]
     pours, skip, g, p = {}, set(), None, None
     for _ in range(6):
-        g = plan_grasp(vial_xy, sc, api, obs, skip=skip)
+        g = (plan_grasp(vial_xy, sc, api, obs, skip=skip, pitches=MOVE_PITCHES, max_tries=400, deeper=deeper) if grasp_test
+             else plan_grasp(vial_xy, sc, api, obs, skip=skip, deeper=deeper))
         if grasp_test:  # pick, lift, put back: no pour, so no pour or carry path to plan (2026-11-26: a grasp test
             break       # failed on the carry path's -2.8 mm vial margin it never drives)
         if g["pitch"] not in pours:
@@ -672,7 +697,8 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
         if not chk.get("ok"):
             raise PlanError(f"cuRobo check: collision at {chk.get('index')}/{chk.get('n')}: {chk.get('detail')}")
         return phase, dict(t_total_s=round(time.perf_counter() - t0, 2), grasp_pitch=g["pitch"], grasp_spin=g["spin"],
-                           grasp_dz=g["dz"], grasp_shallow=g["shallow"], checked=chk.get("checked"))
+                           grasp_dz=g["dz"], grasp_shallow=g["shallow"], checked=chk.get("checked"),
+                           grasp_deeper=grasp_deeper_mm() if deeper is None else deeper)
     phase = {"arm": "77", "label": f"{name} 털어 넣기", "speed_dps": 80, "obstacles": obs[len(ws_obstacles):], "segments": [
         *pick,
         seg(f"컵 위로, {TA[-1]}도 기울이기", carry),
@@ -689,6 +715,7 @@ def plan_phase(vial_xy, cup_xy, others, api, ws_obstacles, rim_z=286.0, cup_r=40
     info = dict(t_ik_s=round(t_ik, 2), t_total_s=round(time.perf_counter() - t0, 2), t_transit_s=round(t_plan - t_ik, 2),
                 grasp_spin=g["spin"], grasp_dz=g["dz"], grasp_shallow=g["shallow"], grasp_pitch=g["pitch"], pour_spin=p["spin"], pour_roll=p["roll"], d_theta_grasp=round(g["d_theta"], 1),
                 d_theta_pour=round(p["d_theta"], 1), pour_grip_clear=round(p["grip_clear"], 1),
+                grasp_deeper=grasp_deeper_mm() if deeper is None else deeper,
                 pour_vial_margin=round(p["vial_margin"], 1), checked=chk.get("checked"),
                 motion_s=round(len(full) * 0.05 + 0.8 + 0.2 + 1.0 + 1.0 + 0.8, 1))
     return phase, info

@@ -303,9 +303,22 @@ def build(photo_dir=None, only=None, move_to=None, vial="matcha"):
                 "say": f"{name}을 ({vial77[0]:.0f}, {vial77[1]:.0f})에서 ({move_to[0]:.0f}, {move_to[1]:.0f}) mm로 옮깁니다. 계획 {total:.1f}초.",
                 "seen": "위 카메라로 병·컵 위치를 재고 경로는 cuRobo로 검사했습니다.", "phases": [ph]}
     moved, ph_mv = None, None
+    # The calibrated grasp depth first, then 3 mm shallower steps: at the reach edge the deeper hand puts J4 on the
+    # board (2026-11-26, matcha vial at r 248: 13 mm none, 10 mm found). The inside check measures what is left.
+    d0 = plan77.grasp_deeper_mm()
+    depths = [d0] + [d for d in (d0 - 3.0, d0 - 6.0, d0 - 9.0) if d >= 0.0]
     try:
-        ph77, info77 = plan77.plan_phase(vial77, cup77, [o.tolist() for o in others77], API, WS.obstacles_for(WS.arms["77"]),
-                                         q_start=start77, grasp_test=(only == "grasp"), name=name, target=vial)
+        for i, d in enumerate(depths):
+            try:
+                ph77, info77 = plan77.plan_phase(vial77, cup77, [o.tolist() for o in others77], API, WS.obstacles_for(WS.arms["77"]),
+                                                 q_start=start77, grasp_test=(only == "grasp"), name=name, target=vial, deeper=d)
+                if i:
+                    log(f"grasp depth {d0:.0f} mm had no path; planned at {d:.0f} mm deeper")
+                break
+            except plan77.PlanError as exc:
+                if i == len(depths) - 1:
+                    raise
+                log(f"grasp {d:.0f} mm deeper: {str(exc)[:120]}")
     except plan77.PlanError as exc:
         if only == "grasp":
             raise

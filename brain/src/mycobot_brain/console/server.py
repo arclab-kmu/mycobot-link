@@ -530,7 +530,13 @@ class Console:
                 full = np.vstack([s.q for s in segs if s.kind == "joints"])
                 secs = sum(len(s.q) * s.q_dt for s in segs if s.kind == "joints")
                 if self.curobo_ok:
-                    chk = curobo_check(self.ws.curobo_api, full, self._phase_obstacles(ph))
+                    # a recovery phase may start in self-contact (an arm left folded onto itself); its first
+                    # "unchecked_start" points only lead out of that contact, the rest is checked as usual
+                    k0 = int(ph.get("unchecked_start", 0))
+                    if k0:
+                        self.say(f"{arm}: 처음 {k0}점(자기 접촉에서 빠져나오는 구간)은 충돌 검사에서 뺍니다")
+                    chk = curobo_check(self.ws.curobo_api, full[k0:] if len(full) - k0 >= 2 else full,
+                                       self._phase_obstacles(ph))
                     if not chk.get("ok"):
                         raise RuntimeError(f"{arm}: 충돌 예상 ({chk.get('index')}/{chk.get('n')}): {chk.get('detail')}")
                     self.say(f"{arm} {ph.get('label', '')}: cuRobo check clear ({chk.get('checked')} samples), "
