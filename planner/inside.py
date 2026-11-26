@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import align  # noqa: E402 - snap() and the photo folder
 import detect  # noqa: E402
-import kin  # noqa: E402
+import kin77 as kin  # noqa: E402 - table-referenced frame (kin77.BASE_DZ)
 import locate  # noqa: E402
 import plan77  # noqa: E402
 

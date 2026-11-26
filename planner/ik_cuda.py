@@ -54,7 +54,8 @@ def chain(T: np.ndarray, seed: np.ndarray, step0: float = 12.0, step_fb: float =
     if lib is None:
         raise RuntimeError("libikchain.so is not available")
     C, K = T.shape[:2]
-    T = np.ascontiguousarray(T, dtype=np.float64)
+    import kin77  # the planner passes table-referenced targets; the kernel's FK is the real base frame
+    T = np.ascontiguousarray(kin77.to_base(T), dtype=np.float64)
     seed = np.ascontiguousarray(seed, dtype=np.float64)
     q = np.zeros((C, K, 6))
     e = np.zeros((C, K))

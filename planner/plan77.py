@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 import ik_cuda
-import kin
+import kin77 as kin  # table-referenced frame (kin77.BASE_DZ)
 
 HERE = Path(__file__).resolve().parent
 TPL = json.loads((HERE / "data" / "templates77.json").read_text())
@@ -289,7 +289,9 @@ def cu_check(api, Q, obstacles):
 
 def box(name, cx, cy, z0, z1, dx, dy, yaw=0.0):
     a = math.radians(yaw) / 2
-    return {"name": name, "dims_mm": [dx, dy, z1 - z0], "pose": [cx, cy, (z0 + z1) / 2, math.cos(a), 0.0, 0.0, math.sin(a)]}
+    # z0 / z1 are planner-frame heights (table at TABLE); cuRobo works in the real .77 base frame
+    return {"name": name, "dims_mm": [dx, dy, z1 - z0],
+            "pose": [cx, cy, (z0 + z1) / 2 + kin.BASE_DZ, math.cos(a), 0.0, 0.0, math.sin(a)]}
 
 
 def cup_boxes(C, rim, r=40.0):
@@ -321,7 +323,7 @@ def _grasp_candidates(spins=(0, -10, 10, -20, 20, -30, 30, -45, 45, -60, 60), dz
 
 def _template_frames():
     G = TPL["grasp"]
-    T0 = kin.fk(np.array(G["q"]))
+    T0 = kin.fk_taught(np.array(G["q"]))
     a_dir = (pad_pt(G["q"]) - pad_pt(G["qa"]))[:2]
     a_dir = a_dir / np.linalg.norm(a_dir)
     H = np.cross([0, 0, 1.0], np.r_[a_dir, 0.0])  # finger-closing axis (horizontal) of the template grasp
@@ -376,7 +378,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
         a_dir = Rz(dth + spin)[:2, :2] @ a0
         target = V - shallow * a_dir
         Hs = Rz(dth + spin) @ H0
-        Tg = kin.fk(np.r_[G["q"][0] + dth, G["q"][1:]])
+        Tg = kin.fk_taught(np.r_[G["q"][0] + dth, G["q"][1:]])
         Tg[:3, 3] += np.r_[target - V0r, dz]
         Tg = turn_about(Tg, target, spin)
         pivot = Tg[:3, :3] @ TLV + Tg[:3, 3]
@@ -387,7 +389,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
         for q in [G["qa"]] + G["sub"] + [G["q"]] + G["lift"]:
             qr = np.array(q, float)
             qr[0] += dth
-            T = kin.fk(qr)
+            T = kin.fk_taught(qr)  # taught template pose
             T[:3, 3] += np.r_[target - V0r, dz]
             tl.append((qr, P @ turn_about(T, target, spin)))
         items.append(((pitch, dz, shallow, spin), tag, a_dir, tl))
@@ -441,7 +443,7 @@ def plan_pour(cup_xy, scene: Scene, api=None, obs=None, pitch=0.0, max_tries=40)
         for q in [P["q40"]] + P["tilt"]:
             qr = np.array(q, float)
             qr[0] += dth
-            T = kin.fk(qr)
+            T = kin.fk_taught(qr)  # taught template pose
             T[:3, 3] += np.r_[C - C0r, 0.0]
             tl.append((qr, turn_about(T, C, spin) @ Cl @ Rr))
         items.append(((spin, roll), tl))

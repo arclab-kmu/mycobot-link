@@ -25,7 +25,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import kin  # noqa: E402
+import kin77 as kin  # noqa: E402 - table-referenced frame (kin77.BASE_DZ)
 import locate  # noqa: E402
 import plan77  # noqa: E402
 
@@ -58,7 +58,7 @@ def hover_pose(xy, z_pad, scene, api, obs):
     dth = plan77.bearing(xy) - plan77.bearing(V0)
     qr = np.array(G["q"], float)
     qr[0] += dth
-    T = kin.fk(qr)
+    T = kin.fk_taught(qr)  # taught template pose
     pad = T[:3, :3] @ plan77.TLV + T[:3, 3]
     T[:3, 3] += np.r_[np.asarray(xy) - pad[:2], z_pad - pad[2]]
     q, e = plan77.ik_walk(qr, T)

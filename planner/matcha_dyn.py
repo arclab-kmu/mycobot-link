@@ -25,7 +25,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import detect  # noqa: E402
-import kin  # noqa: E402
+import kin77 as kin  # noqa: E402 - table-referenced frame (kin77.BASE_DZ)
 import locate  # noqa: E402
 import plan70  # noqa: E402
 import plan77  # noqa: E402
@@ -84,6 +84,8 @@ def world70(p70):
 
 def arm_world(arm, q, extra):
     s = _spheres(q).copy()
+    if arm == "77":
+        s[:, 2] -= kin.BASE_DZ  # spheres come in the real base frame; the .77's world here is table-referenced
     T = kin.fk(np.asarray(q, float))
     if extra:
         s = np.vstack([s, [np.r_[T[:3, :3] @ p + T[:3, 3], r] for p, r in extra]])

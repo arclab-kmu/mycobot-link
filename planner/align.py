@@ -22,7 +22,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import detect  # noqa: E402
-import kin  # noqa: E402
+import kin77 as kin  # noqa: E402 - table-referenced frame (kin77.BASE_DZ)
 import locate  # noqa: E402
 
 DIR = locate.LAB / "plans" / "align"
