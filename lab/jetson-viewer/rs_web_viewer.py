@@ -235,7 +235,12 @@ def make_handler(viewer, max_fps):
             try:
                 while not STOP.is_set():
                     seq, jpg = viewer.jpeg(which, last)
-                    if jpg is None or seq == last:
+                    if jpg is None:
+                        # no frame yet (camera not delivering): wait_newer returns at once for last=-1, so without
+                        # this sleep every open stream spun one thread at 100% and never noticed a closed client
+                        time.sleep(0.2)
+                        continue
+                    if seq == last:
                         continue
                     last = seq
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(jpg))
