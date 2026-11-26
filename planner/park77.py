@@ -30,7 +30,10 @@ def main() -> int:
         legs, start, why = [], q, ""
         # A stop near the table can leave the arm inside cuRobo's margin (a pre-grasp read 0.x mm into it), and cuRobo
         # refuses such a start. Lift the tool straight up first (away from everything below it), then plan from there.
-        for lift in (0.0, 15.0, 30.0, 45.0):
+        # cuRobo does not know the vials here, and on 2026-11-26 the direct path from a pre-grasp swept the fingers at
+        # vial height 30 mm past the matcha vial, so a gripper that is low (below the vial tops) always lifts 60 mm first.
+        low = float(((plan77.kin.fk(q) @ plan77.GPTS.T).T[:, 2]).min()) < plan77.TABLE + 80.0
+        for lift in ((60.0, 45.0, 30.0) if low else (0.0, 15.0, 30.0, 45.0)):
             if lift:
                 T = plan77.kin.fk(q)
                 T[2, 3] += lift
