@@ -1,0 +1,14 @@
+{
+ "trigger": ".70 기본 자세로",
+ "title": ".70 기본 자세로",
+ "vlm": false,
+ "say": ".70을 기본 자세(어깨 20도 뒤)로 옮깁니다.",
+ "seen": "",
+ "generator": {
+  "cmd": [
+   "/home/hkim/IsaacLab/.venv/bin/python",
+   "/home/hkim/manipulation/mycobot-link/planner/park70.py"
+  ],
+  "timeout_s": 30
+ }
+}

@@ -126,6 +126,40 @@ def clearance(tl77, tl70, delay, skew):
     return best
 
 
+REST_GAP_MM = 30.0  # the .77's whole work (vial in hand) against the .70 standing at plan70.HOME
+
+
+def rest_gap(phases77, q70):
+    """Smallest sphere gap between every .77 sample (with the vial once gripped) and the .70 at rest at q70.
+    choose_delay only covers the time after the .70 starts; this covers the pour it waits through."""
+    B = arm_world("70", np.asarray(q70, float), SPOON)
+    best = 1e9
+    for ph in phases77:
+        held = False
+        for s in ph["segments"]:
+            if s["kind"] == "grip":
+                held = s["value"] < 50
+            if s["kind"] != "joints":
+                continue
+            for q in s["q"][::3]:
+                A = arm_world("77", np.asarray(q, float), VIAL if held else [])
+                d = np.linalg.norm(A[:, None, :3] - B[None, :, :3], axis=-1) - A[:, None, 3] - B[None, :, 3]
+                best = min(best, float(d.min()))
+    return best
+
+
+def to_rest70():
+    """A first .70 phase that moves it to plan70.HOME when it stands elsewhere nearby (e.g. the old rest pose)."""
+    q70 = arm_q("70")
+    if q70 is None or np.max(np.abs(q70 - plan70.HOME)) <= 2.0:
+        return None
+    if np.max(np.abs(q70 - plan70.HOME)) > 30.0:
+        raise plan77.PlanError(f".70이 기본 자세에서 {np.max(np.abs(q70 - plan70.HOME)):.0f}도 떨어져 있어요. 먼저 기본 자세로 돌려 주세요.")
+    Q = plan77.timed([([q70, plan70.HOME], 15.0)])
+    return {"arm": "70", "label": ".70 기본 자세로", "speed_dps": 30, "workspace_obstacles": False,
+            "segments": [{"kind": "joints", "label": ".70 기본 자세로", "q": np.round(Q, 3).tolist(), "dt": 0.05}]}
+
+
 def choose_delay(ph77, ph70, step=7, held_until=8, delays=np.arange(2.0, 12.01, 0.5), nominal=40.0, skewed=20.0):
     tl77, _ = timeline(ph77["segments"], from_step=step, held_until=held_until)
     tl70, _ = timeline(ph70["segments"])
@@ -289,6 +323,11 @@ def build(photo_dir=None, only=None, move_to=None):
         ph70["start_with"] = {"step": k_back, "delay_s": delay}
         log(f"two-arm overlap: .70 starts {delay:.1f} s into the .77 return (clearance {c0:.0f} mm, {cs:.0f} mm with 1.5 s skew), "
             f"checked in {t_pair:.2f} s")
+    rg = rest_gap([p for p in (ph_mv, ph77) if p], plan70.HOME)
+    log(f".70 at rest vs the .77's work: {rg:.0f} mm")
+    if rg < REST_GAP_MM:
+        raise plan77.PlanError(f".77이 붓는 동안 쉬고 있는 .70과 {rg:.0f} mm까지 가까워져요 (기준 {REST_GAP_MM:.0f} mm)")
+    pre70 = to_rest70()
     total = time.perf_counter() - t0
     TA = plan77.TPL["pour"]["tilt_angles"]
     scen = {"trigger": "컵에 말차 가루를 타 줘", "title": "말차 타기 (지금 위치로 계획)",
@@ -297,7 +336,7 @@ def build(photo_dir=None, only=None, move_to=None):
                    + f".77이 말차 병을 잡아 {TA[-1]}도까지 기울여 두 번 털고, 병을 제자리로 가져가는 동안 .70이 컵으로 와서 스푼으로 젓습니다.",
             "seen": f"말차 병 ({vial77[0]:.0f}, {vial77[1]:.0f}) mm, 컵 ({cup77[0]:.0f}, {cup77[1]:.0f}) mm (.77 기준), "
                     f"다른 병 {len(others77)}개. 경로는 cuRobo로, 두 팔이 겹치는 구간은 시간축 거리로 검사했습니다.",
-            "phases": ([ph_mv] if ph_mv else []) + [ph77, ph70],
+            "phases": ([pre70] if pre70 else []) + ([ph_mv] if ph_mv else []) + [ph77, ph70],
             "_plan": {"t_measure_s": round(t_meas, 2), "t_total_s": round(total, 2), "vial77": vial77.round(1).tolist(),
                       "moved_to": None if moved is None else list(moved),
                       "cup77": cup77.round(1).tolist(), "cup_px": [round(cup["u"], 1), round(cup["v"], 1)],

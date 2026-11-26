@@ -24,7 +24,10 @@ sys.path.insert(0, str(HERE))
 import mv70  # noqa: E402
 from sp3 import head_of, pose, pose_any  # noqa: E402
 
-HOME = np.array([1.93, -1.75, 7.38, -13.71, 1.58, -132.45])
+# Rest pose while the .77 works. Until 2026-11-26 it was [1.93, -1.75, 7.38, -13.71, 1.58, -132.45]; the .77's
+# 140 deg pour then reached into the .70's wrist (spheres -12 mm, and Hojin saw them touch on run 5), so the shoulder
+# leans 20 deg back: +82 mm from today's pours, the upper arm ~33 mm further from the table.
+HOME = np.array([1.93, 18.25, 7.38, -13.71, 1.58, -132.45])
 LIFT = [np.array(q) for q in json.loads((HERE / "data" / "lift_c3.json").read_text())["lift"]]
 
 
