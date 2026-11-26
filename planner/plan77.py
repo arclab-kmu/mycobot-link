@@ -33,6 +33,14 @@ TPL = json.loads((HERE / "data" / "templates77.json").read_text())
 TLV = np.array(TPL["tlv_pad_mm"])
 VIAL_F = np.array(TPL["vial_in_flange_mm"])
 PARK = np.array(TPL["park"], float)
+TAUGHT_PARK = PARK.copy()
+try:  # a room-specific PARK (park_room.py --write): the taught one touched the raised board in the 2026-11-26 room
+    import locate as _locate  # noqa: E402
+    _pf = _locate.LAB / "park77_q.json"
+    if _pf.exists():
+        PARK = np.array(json.loads(_pf.read_text())["q"], float)
+except Exception:  # noqa: BLE001 - keep the taught PARK
+    pass
 TABLE = float(TPL["table_z"])
 HOUSING = np.array([[x, y, z, 1.0] for x in (-28, 0, 28) for y in (-28, 0, 30) for z in (0, 25, 50, 65)])
 FING = np.array([[x, y, z, 1.0] for x in (-22, -12, 12, 22) for y in (-27, -15, -3) for z in (60, 75, 90)])
