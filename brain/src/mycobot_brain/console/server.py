@@ -494,9 +494,10 @@ class Console:
         """Workspace boxes (unless the phase opts out: the .70 base height in the workspace is too rough for its
         links) plus the phase's own boxes, in the phase arm's base frame."""
         own = list(ph.get("obstacles", []))
+        # up to 60 boxes (the cuRobo server's limit since 2026-11-26: the planner adds top-depth boxes, depth77.py)
         if not ph.get("workspace_obstacles", True):
-            return own[:15]
-        return (self.ws.obstacles_for(self.ws.arms[ph["arm"]]) + own)[:15]
+            return own[:60]
+        return (self.ws.obstacles_for(self.ws.arms[ph["arm"]]) + own)[:60]
 
     def _run_scenario(self, sc: dict[str, Any], execute: bool) -> None:
         """Every phase checked by cuRobo first; then each phase runs as one continuous stream."""
