@@ -218,8 +218,9 @@ def depth_obstacles(q77, vial77, cup77):
         return []
     import depth77
     t0 = time.perf_counter()
-    bx = depth77.boxes(LAST_DEPTH, plan77.PARK if q77 is None else q77, skip=[(float(vial77[0]), float(vial77[1]), 30.0)],
-                       cup=cup77, cup_r=55.0)
+    # skip radii 40 / 60 (were 30 / 55): the AGX coffee runs of 2026-11-27 needed them around the exhibit vial and cup
+    bx = depth77.boxes(LAST_DEPTH, plan77.PARK if q77 is None else q77, skip=[(float(vial77[0]), float(vial77[1]), 40.0)],
+                       cup=cup77, cup_r=60.0)
     log(f"depth obstacles: {len(bx)} boxes in {(time.perf_counter() - t0) * 1000:.0f} ms")
     return bx
 

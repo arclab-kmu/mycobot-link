@@ -198,9 +198,13 @@ class Scene:
         self.r = float(cup_r)
         self.others = [np.asarray(o, float) for o in others]  # (x, y, top_z)
         self.boxes = [(o[0], o[1], 17.0, 17.0, o[2] + 3.0) for o in self.others]
+        self.hand_bias = float(grasp_cfg().get("hand_z_bias_mm", 0.0))
 
     def grip_clear(self, q) -> float:
         P = (kin.fk(q) @ GPTS.T).T[:, :3]
+        # 2026-11-27 exhibit site: the side camera put the real finger centre ~10 mm above the planned one
+        # (cal77_grasp.json hand_z_bias_mm), so the model's gripper is that much lower than the real one
+        P[:, 2] += self.hand_bias
         dd = np.hypot(P[:, 0] - self.C[0], P[:, 1] - self.C[1])
         low = P[:, 2] < self.top + 12
         m = float(np.min(dd[low] - (self.r + 6))) if low.any() else 99.0
@@ -362,6 +366,16 @@ def grasp_deeper_mm() -> float:
         return float(json.loads(p.read_text()).get("deeper_mm", 0.0)) if p.exists() else 0.0
     except (ValueError, OSError):
         return 0.0
+
+
+def grasp_cfg() -> dict:
+    """LAB/cal77_grasp.json as a dict ({} when missing): deeper_mm, dz_mm, hand_z_bias_mm, held_min, held_max."""
+    import os
+    p = Path(os.environ.get("MYCOBOT_LAB", "~/Documents/lab-jetson/console")).expanduser() / "cal77_grasp.json"
+    try:
+        return json.loads(p.read_text()) if p.exists() else {}
+    except (ValueError, OSError):
+        return {}
 
 
 def grasp_dz_mm() -> float:
@@ -560,7 +574,13 @@ def grasp_jac(qg, step=1.0):
 # the close-to-10 command. Measured 2026-11-26 at PARK: closed on nothing 11 (command 10) and 5 (command 0), so an
 # empty hand ends within a few units of the command; a vial stops the fingers well above it.
 GRIP_CLOSE = 10
-GRIP_HELD = (18.0, 80.0)
+GRIP_HELD = (18.0, 80.0)  # old-room vials; the exhibit vials read ~15 when held by the body (2026-11-27)
+
+
+def grip_held():
+    """The gripper reading range that means "holding a vial": cal77_grasp.json held_min / held_max, else GRIP_HELD."""
+    c = grasp_cfg()
+    return float(c.get("held_min", GRIP_HELD[0])), float(c.get("held_max", GRIP_HELD[1]))
 # The pre-grasp alignment measures the finger midline from open/closed difference pixels, which mix parts at
 # different heights; seen at an angle by the top camera they can shift the midline sideways by ~10 mm. On
 # 2026-11-26 two runs shifted the hand by +9.6 and -9.6 mm and then closed beside the vial (side camera, gripper
@@ -638,9 +658,9 @@ def pick_segments(g, start, to_qa, label=None, name="말차 병", target="matcha
             {"kind": "wait", "label": "잡는 중", "seconds": 1.5},
             # 2026-11-26: a run lifted an empty hand and poured air; the camera check after the lift passed because
             # the pushed vial no longer stood on its old spot. The gripper's own opening says it directly.
-            {"kind": "grip_check", "label": "잡았는지 확인(그리퍼)", "min": GRIP_HELD[0], "max": GRIP_HELD[1], "what": name},
+            {"kind": "grip_check", "label": "잡았는지 확인(그리퍼)", "min": grip_held()[0], "max": grip_held()[1], "what": name},
             {"kind": "joints", "label": "들기", "q": R(up), "dt": 0.05, "offset": "out", "ramp": len(up)},
-            {"kind": "grip_check", "label": "들고 있는지 확인(그리퍼)", "min": GRIP_HELD[0], "max": GRIP_HELD[1], "what": name},
+            {"kind": "grip_check", "label": "들고 있는지 확인(그리퍼)", "min": grip_held()[0], "max": grip_held()[1], "what": name},
             lift_check(g, target)]
     return segs, [a1, a2, up]
 
