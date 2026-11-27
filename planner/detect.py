@@ -224,10 +224,11 @@ def _label(mask):
     return lab, n
 
 
-def caps_by_depth(depth_png, cam, table_z, cup=None, h_range=(50.0, 85.0), dia_mm=(25.0, 60.0)):
+def caps_by_depth(depth_png, cam, table_z, cup=None, h_range=(50.0, 85.0), dia_mm=(10.0, 60.0)):
     """Vial caps from the top depth alone, for caps the colour finder cannot see (2026-11-27: silver caps at the
     exhibit site; AGX session's vials_by_depth.py). Blobs whose top stands h_range above the table and spans dia_mm
-    (from the pixel size at the blob's distance, so it holds at any camera height), away from the cup. Returns [dict(u, v, z, dia_px, green=0)] in colour pixels, z = planner z."""
+    (from the pixel size at the blob's distance, so it holds at any camera height), away from the cup. Above +50 only
+    the cap top shows on the exhibit vials (~13-14 mm across on the AGX, 2026-11-27), hence the 10 mm floor. Returns [dict(u, v, z, dia_px, green=0)] in colour pixels, z = planner z."""
     import io
     from PIL import Image
     D = np.asarray(Image.open(io.BytesIO(depth_png))).astype(float)

@@ -5,12 +5,14 @@
 From the AGX session's lab tool path_vs_depth.py (2026-11-27), which caught the black pole and the board edge before the
 first calibration motion at the exhibit site. Same idea, faster: the arm spheres come from the local DH sphere fit
 (spheres.py, numpy, ~2 mm from cuRobo /spheres) instead of one HTTP call per sample, and both the sweep and the depth
-points are thinned to 8 mm voxels (the AGX tool took 4-5 min for 27 maps x 250 samples).
+points stay unthinned apart from every 2nd pixel (thinning to 8 mm voxels made it ~17 mm optimistic against the AGX
+tool on the same scenario, 2026-11-27); with scipy's KD-tree that is seconds, the AGX tool took 4-5 min.
 
 - Points: median of --frames top depth frames, 200 mm under to 450 mm over the table, in the camera world.
 - The .77 axis and yaw come from cal77.json and are perturbed by +-d mm (x, y) and +-yaw deg: 27 maps.
 - Self points (the arm at its start pose: within 40 mm of its spheres, inside r 75 of the axis, or within 90 mm of the
-  spheres inside r 150 above the table) are dropped per map. --skip drops the target vial (world-fixed, below +90).
+  spheres inside r 150 above the table) are dropped if they look like the arm under ANY of the 27 maps: they move with
+  the arm, so a map error does not make them obstacles (per-map dropping flagged the arm's own shell at +-10 mm/+-6 deg). --skip drops the target vial (world-fixed, below +90).
 - Clearance = min over the sweep of (distance to the nearest point - sphere radius), with and without the table-top
   points (+-15 mm of the table: the board box covers those).
 Exit 1 when the worst clearance without the table top is under --min.
@@ -107,35 +109,41 @@ def main() -> int:
     if a.skip:
         sw = R2.T @ (np.array(a.skip[:2]) - T2)
         W = W[~((np.hypot(W[:, 0] - sw[0], W[:, 1] - sw[1]) < a.skip[2]) & (W[:, 2] < t + 90.0))]
-    W = voxel(W, 8.0)
+    W = W[::2]
     axis = -R2.T @ T2
     yaw0 = math.degrees(math.atan2(R2[0, 1], R2[0, 0]))  # base -> world rotation is R2^T
     S_all = np.vstack([spheres.spheres(q) for q in Q])  # real .77 base frame
-    S = voxel(S_all, 8.0, S_all[:, 3])
+    S = S_all
     S0 = spheres.spheres(Q[0])
     z_tab = t + kin77.BASE_DZ  # the table in the real base frame
+    maps = [(dx, dy, dw) for dx in (-a.d, 0.0, a.d) for dy in (-a.d, 0.0, a.d) for dw in (-a.yaw, 0.0, a.yaw)]
+
+    def to_base(dx, dy, dw):
+        c, s = math.cos(math.radians(yaw0 + dw)), math.sin(math.radians(yaw0 + dw))
+        xy = W[:, :2] - (axis + [dx, dy])
+        return np.column_stack([c * xy[:, 0] + s * xy[:, 1], -s * xy[:, 0] + c * xy[:, 1], W[:, 2] + kin77.BASE_DZ])
+
+    self_pts = np.zeros(len(W), bool)
+    for m in maps:
+        P = to_base(*m)
+        d0 = np.concatenate([(np.linalg.norm(P[i:i + 8192, None, :] - S0[None, :, :3], axis=2) - S0[None, :, 3]).min(1)
+                             for i in range(0, len(P), 8192)])  # to the start pose's spheres
+        rr = np.hypot(P[:, 0], P[:, 1])
+        self_pts |= (d0 <= 40.0) | (rr < 75.0) | ((d0 < 90.0) & (rr < 150.0) & (P[:, 2] > z_tab + 15.0))
     res = []
-    for dx in (-a.d, 0.0, a.d):
-        for dy in (-a.d, 0.0, a.d):
-            for dw in (-a.yaw, 0.0, a.yaw):
-                c, s = math.cos(math.radians(yaw0 + dw)), math.sin(math.radians(yaw0 + dw))
-                xy = W[:, :2] - (axis + [dx, dy])
-                P = np.column_stack([c * xy[:, 0] + s * xy[:, 1], -s * xy[:, 0] + c * xy[:, 1], W[:, 2] + kin77.BASE_DZ])
-                d0 = np.concatenate([(np.linalg.norm(P[i:i + 8192, None, :] - S0[None, :, :3], axis=2) - S0[None, :, 3]).min(1)
-                                     for i in range(0, len(P), 8192)])  # to the start pose's spheres
-                rr = np.hypot(P[:, 0], P[:, 1])
-                obj = P[~((d0 <= 40.0) | (rr < 75.0) | ((d0 < 90.0) & (rr < 150.0) & (P[:, 2] > z_tab + 15.0)))]
-                top = np.abs(obj[:, 2] - z_tab) < 15.0
-                c_all = float((nearest(S[:, :3], obj) - S[:, 3]).min()) if len(obj) else float("inf")
-                o2 = obj[~top]
-                if len(o2):
-                    dd = nearest(S[:, :3], o2) - S[:, 3]
-                    k = int(np.argmin(dd))
-                    near = o2[int(np.argmin(np.linalg.norm(o2 - S[k, :3], axis=1)))]
-                    c_obj = float(dd[k])
-                else:
-                    c_obj, near = float("inf"), None
-                res.append((c_all, c_obj, dx, dy, dw, near))
+    for dx, dy, dw in maps:
+        obj = to_base(dx, dy, dw)[~self_pts]
+        top = np.abs(obj[:, 2] - z_tab) < 15.0
+        c_all = float((nearest(S[:, :3], obj) - S[:, 3]).min()) if len(obj) else float("inf")
+        o2 = obj[~top]
+        if len(o2):
+            dd = nearest(S[:, :3], o2) - S[:, 3]
+            k = int(np.argmin(dd))
+            near = o2[int(np.argmin(np.linalg.norm(o2 - S[k, :3], axis=1)))]
+            c_obj = float(dd[k])
+        else:
+            c_obj, near = float("inf"), None
+        res.append((c_all, c_obj, dx, dy, dw, near))
     nom = next(r for r in res if r[2] == 0 and r[3] == 0 and r[4] == 0)
     worst = min(res, key=lambda r: r[1])
     msg = (f"경로-깊이 여유: 지도 그대로 {nom[1]:.0f} mm (테이블 면 포함 {nom[0]:.0f}), 27개 지도 중 최악 {worst[1]:.0f} mm "
