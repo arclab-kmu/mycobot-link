@@ -71,11 +71,7 @@ def cam_points(depth_png: bytes, stride: int = 2) -> np.ndarray:
     return X @ np.asarray(cam.R_dc).T + np.asarray(cam.t_dc)
 
 
-def fit_plane(Xc: np.ndarray, iters: int = 400, tol: float = 6.0, max_tilt_deg: float = 30.0):
-    """The largest plane facing the camera (RANSAC, then least squares on its inliers).
-    Returns n (unit, pointing from the table toward the camera), h (camera centre height above it), rms, inliers."""
-    rng = np.random.default_rng(0)
-    P = Xc[rng.choice(len(Xc), min(len(Xc), 20000), replace=False)]
+def _ransac_plane(P, rng, iters, tol, max_tilt_deg):
     best, best_n = None, -1
     for _ in range(iters):
         a, b, c = P[rng.choice(len(P), 3, replace=False)]
@@ -88,7 +84,38 @@ def fit_plane(Xc: np.ndarray, iters: int = 400, tol: float = 6.0, max_tilt_deg: 
         k = int((np.abs((P - a) @ n) < tol).sum())
         if k > best_n:
             best, best_n = (a, n), k
-    a, n = best
+    return best
+
+
+def fit_plane(Xc: np.ndarray, iters: int = 400, tol: float = 6.0, max_tilt_deg: float = 30.0, verbose: bool = False):
+    """The table plane: of the large flat surfaces facing the camera, the one nearest to it.
+    2026-11-27 10:00: after the setup moved, the .77's lower desk (~213 mm below the table) filled more of the frame
+    than the table, and "the plane with the most points" picked it in one of two runs. The table top is the highest
+    large surface, so up to three planes are peeled off (each >= 8% of the points) and the nearest is taken.
+    Returns n (unit, pointing from the table toward the camera), h (camera centre height above it), rms, inliers."""
+    rng = np.random.default_rng(0)
+    P = Xc[rng.choice(len(Xc), min(len(Xc), 20000), replace=False)]
+    cands = []
+    rest = P
+    for _ in range(3):
+        if len(rest) < 0.08 * len(P):
+            break
+        pl = _ransac_plane(rest, rng, iters, tol, max_tilt_deg)
+        if pl is None:
+            break
+        a, n = pl
+        on = np.abs((rest - a) @ n) < tol
+        if on.sum() < 0.08 * len(P):
+            break
+        cands.append((a, n, int(on.sum())))
+        rest = rest[~on]
+    if not cands:
+        raise SystemExit("평면을 찾지 못했어요")
+    hs = [abs(float(n @ (-a))) for a, n, _ in cands]
+    a, n, _ = cands[int(np.argmin(hs))]
+    if verbose and len(cands) > 1:
+        print("  평면 후보: " + ", ".join(f"높이 {h:.0f} mm ({k}점)" for h, (_, _, k) in zip(hs, cands)) +
+              f" -> 가장 가까운 {min(hs):.0f} mm", file=sys.stderr)
     inl = np.abs((Xc - a) @ n) < tol
     p0 = Xc[inl].mean(0)
     n = np.linalg.svd(Xc[inl] - p0, full_matrices=False)[2][2]
@@ -118,7 +145,7 @@ def new_pose(n: np.ndarray, h: float):
 
 def cmd_plane(a) -> int:
     Xc = cam_points(_depth(a))
-    n, h, rms, k = fit_plane(Xc)
+    n, h, rms, k = fit_plane(Xc, verbose=True)
     z_old, h_old, _ = stored_view()
     tilt = math.degrees(math.acos(min(1.0, float(n @ z_old))))
     vert = math.degrees(math.acos(min(1.0, float(-n[2]))))
@@ -129,7 +156,7 @@ def cmd_plane(a) -> int:
 
 def cmd_pose(a) -> int:
     Xc = cam_points(_depth(a))
-    n, h, rms, k = fit_plane(Xc)
+    n, h, rms, k = fit_plane(Xc, verbose=True)
     R, t = new_pose(n, h)
     W = (Xc - t) @ R
     near = np.abs(W[:, 2] - plan77.TABLE) < 6.0
