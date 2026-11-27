@@ -200,22 +200,46 @@ def obs_map(W: np.ndarray, centre, radius: float, cell: float):
     return o, H
 
 
-def pose_costs(G, top, o, H, cell, yaws, offs, clip=40.0, nan_cost=25.0):
-    """Mean clipped |observed - model| height over the model cells for every (yaw, offset). Returns (len(yaws), len(offs))."""
+def _in_depth_image(P, margin=4.0):
+    """World points (..., 3) -> True where the top depth camera images them (inside the frame, in front)."""
+    cam = locate.CAM
+    pc = P @ np.asarray(cam.R).T + np.asarray(cam.t)
+    pd = (pc - np.asarray(cam.t_dc)) @ np.asarray(cam.R_dc)  # R_dc^T (p_c - t_dc), row-wise
+    D = cam.depth_K
+    z = np.maximum(pd[..., 2], 1e-6)
+    u = D["fx"] * pd[..., 0] / z + D["ppx"]
+    v = D["fy"] * pd[..., 1] / z + D["ppy"]
+    w, h = cam.size
+    return (pd[..., 2] > 0) & (u >= margin) & (u < w - margin) & (v >= margin) & (v < h - margin)
+
+
+def pose_costs(G, top, o, H, cell, yaws, offs, clip=40.0, nan_cost=25.0, with_seen=False):
+    """Mean clipped |observed - model| height over the model cells the depth camera can image, for every (yaw, offset).
+    A cell whose model top falls outside the depth frame is left out: the table or desk under it may still be in view
+    (2026-11-27: the .77 sits on the top edge, and its forearm projected out of the frame while the desk below it did
+    not, so the right pose was charged as if the arm were missing). A cell in the frame with no depth costs nan_cost.
+    Returns (len(yaws), len(offs)), and with_seen also the share of all model cells that are in the frame with depth."""
     n = H.shape[0]
-    out = np.empty((len(yaws), len(offs)))
+    out = np.full((len(yaws), len(offs)), np.inf)
+    vis = np.zeros((len(yaws), len(offs)))
     for i, th in enumerate(yaws):
         c, s = math.cos(th), math.sin(th)
         Gw = G @ np.array([[c, s], [-s, c]])  # rows: Rz(th) @ g
-        ij = np.floor((Gw[None, :, :] + offs[:, None, :] - o) / cell).astype(int)
+        XY = Gw[None, :, :] + offs[:, None, :]
+        inimg = _in_depth_image(np.concatenate([XY, np.broadcast_to(top, XY.shape[:2])[..., None]], -1))
+        ij = np.floor((XY - o) / cell).astype(int)
         ok = (ij >= 0).all(2) & (ij < n).all(2)
         ijc = np.clip(ij, 0, n - 1)
         h = H[ijc[..., 0], ijc[..., 1]]
         h[~ok] = np.nan
         d = np.abs(h - top[None, :])
-        d = np.where(np.isnan(d), nan_cost, np.minimum(d, clip))
-        out[i] = d.mean(1)
-    return out
+        has = inimg & ~np.isnan(d)
+        vis[i] = has.mean(1)
+        cost = np.where(np.isnan(d), nan_cost, np.minimum(d, clip))
+        cnt = inimg.sum(1)
+        tot = np.where(inimg, cost, 0.0).sum(1)
+        out[i] = np.where(cnt >= 0.2 * len(G), tot / np.maximum(cnt, 1), np.inf)  # mostly out of the frame: no pose
+    return (out, vis) if with_seen else out
 
 
 def guess_base(W):
@@ -247,7 +271,7 @@ def guess_base(W):
     return sorted(out, key=lambda r: -r[1])
 
 
-def fit_pose(S, W, c0, search, dzs=(0.0,), zmin=None, yaw_step=3.0):
+def fit_pose(S, W, c0, search, dzs=(0.0,), zmin=None, yaw_step=3.0, r_yaw=None):
     """Place spheres S (arm frame) in the world as Rz(th) p + (c, dz) so their top-view height map matches the depth.
     Coarse on 10 mm cells (xy step 10, yaw `yaw_step`, every dz), then fine on 5 mm cells around the best."""
     t0 = time.perf_counter()
@@ -278,6 +302,28 @@ def fit_pose(S, W, c0, search, dzs=(0.0,), zmin=None, yaw_step=3.0):
             dyaw = np.abs((np.degrees(ys - th) + 180.0) % 360.0 - 180.0)
             res["alt"] = float(C[dyaw > 25.0].min())
         res.update(th=th, c=c, dz=dz, best=cost)
+    if r_yaw:
+        # Yaw from the parts that stick out of the column only. 2026-11-27: at the room's park the .77 is nearly
+        # upright; its column (r < ~90 mm) is the same at every yaw and drowned the forearm/gripper (r 91-142, 17 of
+        # 153 spheres), so the gap to the best other yaw was 1-3 mm. xy stays from the fit above (+-6 mm).
+        far = np.hypot(G[:, 0], G[:, 1]) > r_yaw
+        if far.sum() >= 10:
+            Gf, tf = G[far], top[far]
+            ys = np.radians(np.arange(0.0, 360.0, 1.0))
+            g = np.arange(-6.0, 6.1, 2.0)
+            offs = np.stack(np.meshgrid(g, g, indexing="ij"), -1).reshape(-1, 2) + res["c"]
+            C, V = pose_costs(Gf, tf + res["dz"], o, H, cell, ys, offs, with_seen=True)
+            k = np.where(V >= 0.5, C, np.inf).min(1)  # only poses that see at least half of those cells
+            res["n_far"] = int(far.sum())
+            if np.isfinite(k).any():
+                i = int(np.argmin(k))
+                dyaw = np.abs((np.degrees(ys - ys[i]) + 180.0) % 360.0 - 180.0)
+                alt = k[(dyaw > 25.0) & np.isfinite(k)]
+                j = int(np.argmin(np.where(V[i] >= 0.5, C[i], np.inf)))
+                res.update(th=float(ys[i]), c=offs[j].copy(), yaw_best=float(k[i]),
+                           yaw_alt=float(alt.min()) if len(alt) else float("inf"))
+            else:  # those parts are out of view at every yaw: keep the whole-model fit, and say the yaw is unknown
+                res.update(yaw_best=float("nan"), yaw_alt=float("nan"))
     # how many model cells have depth at all, and how many of those are within 15 mm of the model top
     cs, sn = math.cos(res["th"]), math.sin(res["th"])
     Gw = G @ np.array([[cs, sn], [-sn, cs]]) + res["c"]
@@ -285,8 +331,12 @@ def fit_pose(S, W, c0, search, dzs=(0.0,), zmin=None, yaw_step=3.0):
     okk = (ij >= 0).all(1) & (ij < H.shape[0]).all(1)
     h = np.full(len(G), np.nan)
     h[okk] = H[ij[okk, 0], ij[okk, 1]]
+    h[~_in_depth_image(np.column_stack([Gw, top + res["dz"]]))] = np.nan
     seen = ~np.isnan(h)
     res["seen"] = float(seen.mean())
+    if "n_far" in res:
+        far = np.hypot(G[:, 0], G[:, 1]) > r_yaw
+        res["seen_far"] = float(seen[far].mean())
     res["match"] = float(np.mean(np.abs(h[seen] - top[seen] - res["dz"]) < 15.0)) if seen.any() else 0.0
     res["yaw_w"] = (math.degrees(res["th"]) + 180.0) % 360.0 - 180.0
     res["dt"] = time.perf_counter() - t0
@@ -315,10 +365,20 @@ def _start(a, W, z_guess):
     return None
 
 
+def _yaw_clear(r) -> bool:
+    """The yaw is trusted when the parts away from the column are mostly in view and fit clearly better at it."""
+    if "n_far" in r:
+        return r["seen_far"] > 0.5 and bool(r["yaw_alt"] - r["yaw_best"] > 8.0)  # NaN (never in view) -> False
+    return r["alt"] - r["best"] > 4.0
+
+
 def _report(name, r, c0, q, extra=""):
     return (f"{name} 위치(새 카메라 world): 축 ({r['c'][0]:.1f}, {r['c'][1]:.1f}){extra}, yaw {r['yaw_w']:+.1f}°; "
             f"높이 차 평균 {r['best']:.1f} mm (다른 yaw 최선 {r['alt']:.1f}, 차이 {r['alt'] - r['best']:.1f}), "
-            f"깊이 있는 칸 {r['seen']:.0%} 중 15 mm 안 {r['match']:.0%}, 시작점 ({c0[0]:.0f}, {c0[1]:.0f}), "
+            f"깊이 있는 칸 {r['seen']:.0%} 중 15 mm 안 {r['match']:.0%}, "
+            + (f"방향(튀어나온 {r['n_far']}칸, 보이는 {r['seen_far']:.0%}): 차 {r['yaw_best']:.1f} vs 다른 yaw {r['yaw_alt']:.1f} "
+               f"(차이 {r['yaw_alt'] - r['yaw_best']:.1f}), " if "n_far" in r else "")
+            + f"시작점 ({c0[0]:.0f}, {c0[1]:.0f}), "
             f"q {np.round(q, 1).tolist()}, {r['dt']:.1f} s")
 
 
@@ -340,7 +400,7 @@ def cmd_arm77(a) -> int:
         c0 = cands[0][0]
     S = spheres.spheres(q).copy()
     S[:, 2] -= kin77.BASE_DZ  # table-referenced, = camera world z
-    r = fit_pose(S, W, c0, a.search, zmin=plan77.TABLE - 150.0)  # lower parts hide behind the table edge
+    r = fit_pose(S, W, c0, a.search, zmin=plan77.TABLE - 150.0, r_yaw=a.r_yaw)  # lower parts hide behind the table edge
     th, c = r["th"], r["c"]
     cs, sn = math.cos(th), math.sin(th)
     R2 = np.array([[cs, sn], [-sn, cs]])  # Rz(-th): world -> .77
@@ -348,7 +408,7 @@ def cmd_arm77(a) -> int:
     msg = _report(".77", r, c0, q)
     # the absolute height error depends on occlusion and on the sphere model vs the real shell (synthetic: 14 mm for
     # the right pose); the gap to the best other yaw and the matched share are what tell a clear fit
-    clear = r["best"] < 30.0 and r["alt"] - r["best"] > 4.0 and r["seen"] > 0.4 and r["match"] > 0.5
+    clear = r["best"] < 30.0 and r["seen"] > 0.3 and r["match"] > 0.5 and _yaw_clear(r)
     if a.png:
         _draw(a.png, S, th, c)
         msg += f"; 그림 {a.png}"
@@ -386,9 +446,9 @@ def cmd_arm70(a) -> int:
     T = kin.fk(q)  # the .70's own base frame (no table reference)
     spoon = [np.r_[T[:3, :3] @ (tool * f) + T[:3, 3], 12.0] for f in np.linspace(0.15, 1.0, 7)]
     S = np.vstack([spheres.spheres(q), spoon])
-    r = fit_pose(S, W, c0, a.search, dzs=np.arange(a.bz[0], a.bz[1] + 0.1, 10.0), yaw_step=4.0)
+    r = fit_pose(S, W, c0, a.search, dzs=np.arange(a.bz[0], a.bz[1] + 0.1, 10.0), yaw_step=4.0, r_yaw=a.r_yaw)
     msg = _report(".70", r, c0, q, extra=f", 받침 z {r['dz']:.0f}")
-    clear = r["best"] < 30.0 and r["alt"] - r["best"] > 4.0 and r["seen"] > 0.25 and r["match"] > 0.5
+    clear = r["best"] < 30.0 and r["seen"] > 0.25 and r["match"] > 0.5 and _yaw_clear(r)
     if a.png:
         S2 = S.copy()
         S2[:, 2] += r["dz"]
@@ -465,6 +525,8 @@ def main() -> int:
             p.add_argument("--near-depth-px", nargs=2, type=float, help="... or near the point seen at this depth pixel")
             p.add_argument("--search", type=float, default=80.0, help="xy search radius around the start (mm)")
             p.add_argument("--png", help="draw the fitted model on the live colour image")
+            p.add_argument("--r-yaw", type=float, default=0.0,
+                           help="judge the yaw on model cells farther than this from the axis (mm; 0 = all cells)")
     sp.choices["arm70"].add_argument("--bz", nargs=2, type=float, default=[-100.0, 60.0],
                                      help="range of the .70 base height (camera world z, table at 197)")
     p = sp.add_parser("heights")
