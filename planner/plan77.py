@@ -402,6 +402,9 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
     V0r = (Rz(dth) @ np.r_[V0, 0])[:2]
     T0, a0, H0 = _template_frames()
     gdz = grasp_dz_mm()
+    # sideways shift of the grasp point, + to the left of the approach (inside.py's lat axis); 2026-11-27 Hojin's
+    # hand-taught body grasp of the exhibit vial stood 14 mm to the right of the planned one
+    glat = float(grasp_cfg().get("lateral_mm", 0.0))
     why = []
     cands = _grasp_candidates(pitches=pitches)
     if only is not None:  # e.g. a place pose must hold the vial exactly like the grasp did: same pitch, dz, shallow
@@ -410,9 +413,10 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
     for pitch, dz, shallow, spin in cands[:max_tries]:
         if (pitch, dz, shallow, spin) in skip:
             continue
-        tag = f"pitch {pitch:.0f} dz {dz:.0f}{f'{gdz:+.0f}' if gdz else ''} shallow {shallow:.0f} spin {spin}"
+        tag = (f"pitch {pitch:.0f} dz {dz:.0f}{f'{gdz:+.0f}' if gdz else ''} shallow {shallow:.0f} spin {spin}"
+               + (f" lat {glat:+.0f}" if glat else ""))
         a_dir = Rz(dth + spin)[:2, :2] @ a0
-        target = V - shallow * a_dir
+        target = V - shallow * a_dir + glat * np.array([-a_dir[1], a_dir[0]])
         Hs = Rz(dth + spin) @ H0
         Tg = kin.fk_taught(np.r_[G["q"][0] + dth, G["q"][1:]])
         Tg[:3, 3] += np.r_[target - V0r, dz + gdz]

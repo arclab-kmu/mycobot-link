@@ -116,9 +116,11 @@ def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=3
         tiles = {}
         for c in comp:
             tiles.setdefault((c[0] // per, c[1] // per), []).append(c)
-        floating = (min(under[c] for c in comp) > t + 100.0  # vials (+65) and the cup (+83) never float
-                    and np.mean([c in tab_cells for c in comp]) > 0.6)
         for cs in tiles.values():
+            # per tile, not per blob: the black pole merged with a tissue box standing under it, and the whole blob
+            # was filled down to the table (2026-11-27). Above +130 only overhangs (pole seen 160-181) qualify;
+            # vials (+65), the cup (+83) and the tissue box never do.
+            floating = (min(under[c] for c in cs) > t + 130.0 and np.mean([c in tab_cells for c in cs]) > 0.6)
             a = np.array(cs)
             lo, hi = a.min(0) * cell - 10.0 - pad, (a.max(0) + 1) * cell + 10.0 + pad
             zt = max(occ[c] for c in cs) + 10.0 + pad
