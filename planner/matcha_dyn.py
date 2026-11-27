@@ -190,6 +190,10 @@ def measure(photo_dir=None):
         (Path(photo_dir) / "top_depth.png").write_bytes(dep_b)
     d = detect.detect(rgb, lambda pts: locate.heights(dep_b, pts), r_fix=locate.rim_px_radius, cup_ok=locate.cup_ok)
     d["depth_caps"] = []
+    ws_cfg = json.loads(locate.lab_file("workspace.json").read_text())
+    if ws_cfg.get("cap_finder") == "depth":
+        # silver caps (2026-11-27): the colour finder sometimes called one "green" and the depth fallback never ran
+        d["matcha"], d["others"] = None, []
     if d["matcha"] is None or not d["others"]:
         # caps the colour finder misses (silver caps, 2026-11-27): from the depth, minus anything within 120 mm of the
         # .77 axis (its own gripper at park made a cap-height blob at r 89)
