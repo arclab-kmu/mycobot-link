@@ -376,13 +376,33 @@ def cmd_fit2d(args):
         R_ = np.array([[math.cos(th_), -math.sin(th_)], [math.sin(th_), math.cos(th_)]])
         return th_, R_, mq - R_ @ mw
 
-    oa = ol = 0.0
-    for _ in range(5 if fit_off else 1):
-        th, R2, t2 = rigid(P + oa * F + ol * L)
-        if fit_off:  # offsets from the residual, with a +-10 mm prior
-            r_ = (Wp @ R2.T + t2) - P
-            A_ = np.vstack([np.c_[F[:, 0], L[:, 0]], np.c_[F[:, 1], L[:, 1]], np.eye(2) * 0.1])
-            oa, ol = np.linalg.lstsq(A_, np.r_[r_[:, 0], r_[:, 1], 0.0, 0.0], rcond=None)[0]
+    def solve():
+        oa_ = ol_ = 0.0
+        for _ in range(5 if fit_off else 1):
+            th_, R_, t_ = rigid(P + oa_ * F + ol_ * L)
+            if fit_off:  # offsets from the residual, with a +-10 mm prior
+                r_ = (Wp @ R_.T + t_) - P
+                A_ = np.vstack([np.c_[F[:, 0], L[:, 0]], np.c_[F[:, 1], L[:, 1]], np.eye(2) * 0.1])
+                oa_, ol_ = np.linalg.lstsq(A_, np.r_[r_[:, 0], r_[:, 1], 0.0, 0.0], rcond=None)[0]
+        return th_, R_, t_, oa_, ol_
+
+    # Outliers: a difference blob that is not the gripper (2026-11-27 new site: spots 13 and 14 picked changes far
+    # from the hand, residuals 384 / 278 mm, and the fit came out rms 149 mm). Drop the worst while it is > 25 mm and
+    # > 3x the median, keeping >= 6.
+    out_ids = []
+    while True:
+        th, R2, t2, oa, ol = solve()
+        rn = np.linalg.norm((Wp @ R2.T + t2) - (P + oa * F + ol * L), axis=1)
+        k = int(np.argmax(rn))
+        if len(info) <= 6 or rn[k] <= max(25.0, 3.0 * float(np.median(rn))):
+            break
+        out_ids.append((info[k][0], round(float(rn[k]))))
+        keep_ = np.arange(len(info)) != k
+        info = [it for it, kp in zip(info, keep_) if kp]
+        Wp, P, F, L = Wp[keep_], P[keep_], F[keep_], L[keep_]
+        radii = radii[keep_]
+    if out_ids:
+        print(f"fit2d: 손이 아닌 차이로 보이는 자리 제외 {out_ids}", file=sys.stderr)
     res = (Wp @ R2.T + t2) - (P + oa * F[:, :] + ol * L)
     rms = float(np.sqrt((res ** 2).sum(1).mean()))
     # free similarity scale (Umeyama), only as a check of the camera model

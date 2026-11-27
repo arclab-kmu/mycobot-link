@@ -67,8 +67,11 @@ if port_free 8096; then
 fi
 # command-box scenarios that sit next to the workspace file (measure-and-plan generators, see planner/README.md)
 scen=()
-for f in matcha_live coffee_live matcha_grasp_test coffee_grasp_test matcha_move_test cal77_scenario park77 park70 wiggle77; do
-  [ -f "$(dirname "$WS")/$f.json" ] && scen+=(--scenario "$(dirname "$WS")/$f.json")
+# lab-only extras (one scenario name per line, e.g. unfold77 / retreat77 on the AGX): $LAB/scenarios.extra
+extra=()
+[ -f "$(dirname "$WS")/scenarios.extra" ] && mapfile -t extra < <(grep -v '^\s*#' "$(dirname "$WS")/scenarios.extra" | tr -d ' ')
+for f in matcha_live coffee_live matcha_grasp_test coffee_grasp_test matcha_move_test cal77_scenario park77 park70 wiggle77 "${extra[@]}"; do
+  [ -n "$f" ] && [ -f "$(dirname "$WS")/$f.json" ] && scen+=(--scenario "$(dirname "$WS")/$f.json")
 done
 cd "$HERE/brain"
 uv run --extra console mycobot-brain -v console --workspace "$WS" "${scen[@]}"
