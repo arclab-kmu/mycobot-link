@@ -202,3 +202,70 @@ def detect(rgb, height_of=None, cap_z=(245.0, 282.0), r_fix=None, cup_ok=None):
     matcha = caps[0] if caps and caps[0]["green"] > 3.0 else None
     others = [c for c in caps if c is not matcha]
     return dict(cup=cup, matcha=matcha, others=others)
+
+
+def _label(mask):
+    """4-connected components of a boolean image (numpy + a stack; masks here hold a few thousand pixels)."""
+    lab = np.zeros(mask.shape, int)
+    n = 0
+    for v0, u0 in zip(*np.nonzero(mask)):
+        if lab[v0, u0]:
+            continue
+        n += 1
+        st = [(v0, u0)]
+        lab[v0, u0] = n
+        while st:
+            v, u = st.pop()
+            for dv, du in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                a, b = v + dv, u + du
+                if 0 <= a < mask.shape[0] and 0 <= b < mask.shape[1] and mask[a, b] and not lab[a, b]:
+                    lab[a, b] = n
+                    st.append((a, b))
+    return lab, n
+
+
+def caps_by_depth(depth_png, cam, table_z, cup=None, h_range=(50.0, 85.0), dia_mm=(25.0, 60.0)):
+    """Vial caps from the top depth alone, for caps the colour finder cannot see (2026-11-27: silver caps at the
+    exhibit site; AGX session's vials_by_depth.py). Blobs whose top stands h_range above the table and spans dia_mm
+    (from the pixel size at the blob's distance, so it holds at any camera height), away from the cup. Returns [dict(u, v, z, dia_px, green=0)] in colour pixels, z = planner z."""
+    import io
+    from PIL import Image
+    D = np.asarray(Image.open(io.BytesIO(depth_png))).astype(float)
+    h, w = D.shape
+    vv, uu = np.mgrid[0:h, 0:w]
+    K = cam.depth_K
+    ok = D > 0
+    X = np.stack([(uu - K["ppx"]) / K["fx"] * D, (vv - K["ppy"]) / K["fy"] * D, D], -1)[ok]
+    Xc = X @ np.asarray(cam.R_dc).T + np.asarray(cam.t_dc)
+    Hz = ((Xc - np.asarray(cam.t)) @ np.asarray(cam.R))[:, 2] - table_z
+    Kc = cam.K
+    uc = Xc[:, 0] / Xc[:, 2] * Kc["fx"] + Kc["ppx"]
+    vc = Xc[:, 1] / Xc[:, 2] * Kc["fy"] + Kc["ppy"]
+    W_, H_ = cam.size
+    sel = (Hz > h_range[0]) & (Hz < h_range[1]) & (uc >= 0) & (uc < W_) & (vc >= 0) & (vc < H_)
+    m = np.zeros((H_, W_), bool)
+    m[vc[sel].astype(int), uc[sel].astype(int)] = True
+    for _ in range(2):  # closing: fill the stereo holes in a cap
+        m = m | np.roll(m, 1, 0) | np.roll(m, -1, 0) | np.roll(m, 1, 1) | np.roll(m, -1, 1)
+    for _ in range(2):
+        m = m & np.roll(m, 1, 0) & np.roll(m, -1, 0) & np.roll(m, 1, 1) & np.roll(m, -1, 1)
+    lab, n = _label(m)
+    out = []
+    us, vs, hs, zs = uc[sel], vc[sel], Hz[sel], Xc[sel, 2]
+    for i in range(1, n + 1):
+        ys, xs = np.nonzero(lab == i)
+        if len(xs) < 40:
+            continue
+        dia = 2.0 * np.sqrt(len(xs) / np.pi)
+        u, v = float(xs.mean()), float(ys.mean())
+        inb = (np.abs(us - u) < dia / 2) & (np.abs(vs - v) < dia / 2)
+        if not inb.any():
+            continue
+        dmm = dia * float(np.median(zs[inb])) / Kc["fx"]
+        if not dia_mm[0] <= dmm <= dia_mm[1]:
+            continue
+        if cup is not None and cup.get("n_edge", 0) >= 40 and np.hypot(u - cup["u"], v - cup["v"]) < cup["r_px"] + 20:
+            continue
+        out.append(dict(u=u, v=v, z=float(table_z + np.percentile(hs[inb], 90)), dia_px=float(dia), dia_mm=float(dmm),
+                        green=0.0, by="depth"))
+    return out

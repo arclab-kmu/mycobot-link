@@ -189,6 +189,16 @@ def measure(photo_dir=None):
         (Path(photo_dir) / "top.jpg").write_bytes(rgb_b)
         (Path(photo_dir) / "top_depth.png").write_bytes(dep_b)
     d = detect.detect(rgb, lambda pts: locate.heights(dep_b, pts), r_fix=locate.rim_px_radius, cup_ok=locate.cup_ok)
+    d["depth_caps"] = []
+    if d["matcha"] is None or not d["others"]:
+        # caps the colour finder misses (silver caps, 2026-11-27): from the depth, minus anything within 120 mm of the
+        # .77 axis (its own gripper at park made a cap-height blob at r 89)
+        try:
+            dc = detect.caps_by_depth(dep_b, locate.CAM, plan77.TABLE, d["cup"])
+            d["depth_caps"] = [c for c in dc
+                               if np.hypot(*locate.to77(locate.at(c["u"], c["v"], locate.CAP_Z))) >= 120.0]
+        except Exception as exc:  # noqa: BLE001 - the colour result still stands
+            log(f"caps_by_depth failed: {exc}")
     global LAST_DEPTH
     LAST_DEPTH = dep_b  # the same frame's depth, for depth77.boxes()
     return rgb, d
@@ -238,8 +248,26 @@ def bias77():
         return 0.0
 
 
+def _by_position(caps, vial):
+    """Silver caps: the lab says where the matcha vial stands in the top image (workspace.json
+    "vial_by_position": {"matcha": "right" | "left"}, right = larger colour u); coffee is the other one."""
+    rule = json.loads(locate.lab_file("workspace.json").read_text()).get("vial_by_position", {}).get("matcha")
+    if rule not in ("right", "left") or len(caps) < 1:
+        raise plan77.PlanError("뚜껑 색으로 병을 구별하지 못했어요: 어느 쪽이 말차 병인지 workspace.json "
+                               "vial_by_position 으로 알려 주세요")
+    order = sorted(caps, key=lambda c: c["u"], reverse=(rule == "right"))
+    t = order[0] if vial == "matcha" else (order[1] if len(order) > 1 else None)
+    if t is None:
+        raise plan77.PlanError("깊이로 찾은 병이 하나뿐이라 커피 병을 고를 수 없어요")
+    log(f"{vial} vial by position ({rule} = matcha) from {len(caps)} depth caps")
+    return t, [c for c in caps if c is not t]
+
+
 def pick_target(d, vial):
-    """(target cap, other caps) from detect(): matcha = the green cap; coffee = the least green of the others."""
+    """(target cap, other caps) from detect(): matcha = the green cap; coffee = the least green of the others.
+    With no colour caps (silver), the depth caps and the lab's position rule (_by_position)."""
+    if d["matcha"] is None:  # no green cap: colour cannot tell the vials apart (both silver), so position decides
+        return _by_position(d.get("depth_caps") or list(d["others"]), vial)
     caps = ([d["matcha"]] if d["matcha"] is not None else []) + list(d["others"])
     if vial == "matcha":
         t = d["matcha"]
