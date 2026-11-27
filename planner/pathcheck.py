@@ -11,8 +11,10 @@ tool on the same scenario, 2026-11-27); with scipy's KD-tree that is seconds, th
 - Points: median of --frames top depth frames, 200 mm under to 450 mm over the table, in the camera world.
 - The .77 axis and yaw come from cal77.json and are perturbed by +-d mm (x, y) and +-yaw deg: 27 maps.
 - Self points (the arm at its start pose: within 40 mm of its spheres, inside r 75 of the axis, or within 90 mm of the
-  spheres inside r 150 above the table) are dropped if they look like the arm under ANY of the 27 maps: they move with
-  the arm, so a map error does not make them obstacles (per-map dropping flagged the arm's own shell at +-10 mm/+-6 deg). --skip drops the target vial (world-fixed, below +90).
+  spheres inside r 150 above the table) are found once, under the nominal map, and dropped in every map: they move
+  with the arm, so a map error does not make them obstacles (per-map dropping flagged the arm's own shell at
+  +-10 mm/+-6 deg), and a fixture just outside that band stays an obstacle in all maps (dropping what looks like the
+  arm under ANY map silently ate an unknown point 154 mm from the axis, 2026-11-27). --skip drops the target vial (world-fixed, below +90).
 - Clearance = min over the sweep of (distance to the nearest point - sphere radius), with and without the table-top
   points (+-15 mm of the table: the board box covers those).
 Exit 1 when the worst clearance without the table top is under --min.
@@ -124,7 +126,7 @@ def main() -> int:
         return np.column_stack([c * xy[:, 0] + s * xy[:, 1], -s * xy[:, 0] + c * xy[:, 1], W[:, 2] + kin77.BASE_DZ])
 
     self_pts = np.zeros(len(W), bool)
-    for m in maps:
+    for m in [(0.0, 0.0, 0.0)]:
         P = to_base(*m)
         d0 = np.concatenate([(np.linalg.norm(P[i:i + 8192, None, :] - S0[None, :, :3], axis=2) - S0[None, :, 3]).min(1)
                              for i in range(0, len(P), 8192)])  # to the start pose's spheres
