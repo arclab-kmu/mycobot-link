@@ -130,6 +130,16 @@ def cmd_plan(args):
         png = urllib.request.urlopen(depth77.DEPTH_URL, timeout=5).read()
         dep = depth77.boxes(png, q77=start, low=args.depth_low, pad=args.depth_obs,
                             max_boxes=max(0, plan77.MAX_OBS - len(obs)))
+        # a box the arm already stands in is its own body or what it stands next to (2026-11-27: a white block at the
+        # .77's upper left, 7 mm into joint 3 at the start pose): cuRobo could not leave the start, so leave it out
+        keep = []
+        for bx in dep:
+            if plan77.cu_check(api, [start, start], [bx]).get("ok", True):
+                keep.append(bx)
+            else:
+                print(f"cal77 plan: depth box {bx['name']} at {np.round(bx['pose'][:2], 0).tolist()} touches the start "
+                      f"pose, left out", file=sys.stderr)
+        dep = keep
         print(f"cal77 plan: {len(dep)} depth boxes (pad {args.depth_obs:.0f} mm, from table {args.depth_low:+.0f})",
               file=sys.stderr)
         obs = obs + dep
@@ -256,7 +266,11 @@ def _centroids(win_px=120.0, min_n=30):
             continue
         w = d[mask]
         u, v = float((uu[mask] * w).sum() / w.sum()), float((vv[mask] * w).sum() / w.sum())
-        out.append(dict(i=m["i"], q=m["q"], px=[u, v], n=int(mask.sum()), guess=guess.round(1).tolist()))
+        # a difference blob cut by the frame has its centroid pulled inward (2026-11-27: two corner spots, 31 mm off)
+        H_, W_ = d.shape
+        border = (uu[mask] < 10) | (uu[mask] >= W_ - 10) | (vv[mask] < 10) | (vv[mask] >= H_ - 10)
+        out.append(dict(i=m["i"], q=m["q"], px=[u, v], n=int(mask.sum()), guess=guess.round(1).tolist(),
+                        edge=bool(border.mean() > 0.02)))
     return out
 
 
@@ -326,10 +340,15 @@ def cmd_fit(args):
 def cmd_fit2d(args):
     import align  # noqa: E402 - FINGER_POINT: flange-frame centre of the open/close difference (fit 2026-11-25)
     obs = [o for o in _centroids(win_px=args.win, min_n=800)]
+    dropped = [o["i"] for o in obs if o.get("edge")]
+    if len(obs) - len(dropped) >= 6:
+        obs = [o for o in obs if not o.get("edge")]
+    else:
+        dropped = []
     if len(obs) < 6:
         print(f"보정 실패: 쓸 만한 열림/닫힘 차이가 {len(obs)}곳뿐이에요")
         sys.exit(1)
-    rows, rhs, info = [], [], []
+    info = []
     for o in obs:
         T = kin.fk(np.array(o["q"]))
         p = T[:3, :3] @ align.FINGER_POINT + T[:3, 3]
@@ -338,24 +357,38 @@ def cmd_fit2d(args):
         l = np.array([-f[1], f[0]])
         w = locate.at(o["px"][0], o["px"][1], p[2])[:2]  # camera world at the finger point's height
         # unknowns c, s, tx, ty, oa, ol:  [c -s; s c] w + t = p + oa f + ol l
-        rows += [[w[0], -w[1], 1, 0, -f[0], -l[0]], [w[1], w[0], 0, 1, -f[1], -l[1]]]
-        rhs += [p[0], p[1]]
         info.append((o["i"], w, p[:2], f, l))
-    A, b = np.array(rows, float), np.array(rhs, float)
-    prior = np.zeros((2, 6))
-    prior[0, 4] = prior[1, 5] = 1.0 / 10.0  # finger-centre offset ~ +-10 mm
-    x = np.linalg.lstsq(np.vstack([A, prior]), np.r_[b, 0, 0], rcond=None)[0]
-    scale = float(np.hypot(x[0], x[1]))
-    th = math.atan2(x[1], x[0])
-    c, s_ = math.cos(th), math.sin(th)
-    R2 = np.array([[c, -s_], [s_, c]])
-    # translation and offset again with a pure rotation (locate.from77 inverts R2 by transposing)
-    A2 = np.array([[1, 0, -it[3][0], -it[4][0]] for it in info] + [[0, 1, -it[3][1], -it[4][1]] for it in info], float)
-    b2 = np.r_[[it[2][0] - (R2 @ it[1])[0] for it in info], [it[2][1] - (R2 @ it[1])[1] for it in info]]
-    y = np.linalg.lstsq(np.vstack([A2, [[0, 0, 0.1, 0], [0, 0, 0, 0.1]]]), np.r_[b2, 0, 0], rcond=None)[0]
-    t2, oa, ol = y[:2], float(y[2]), float(y[3])
-    res = np.array([R2 @ it[1] + t2 - (it[2] + oa * it[3] + ol * it[4]) for it in info])
+    # Rigid 2-D map (rotation + translation, scale 1) by Procrustes. The finger-centre offsets (along / across the
+    # fingers) are fitted only when the spots spread in radius: at one radius a sideways offset is the same as a
+    # rotation and an along offset the same as a scale (2026-11-27: 8 spots at r 190-210 gave rotation +78 deg,
+    # across +85 mm, scale 0.52 from the free similarity fit, against ~+51 deg from a rigid fit on the same photos).
+    Wp = np.array([it[1] for it in info])
+    P = np.array([it[2] for it in info])
+    F = np.array([it[3] for it in info])
+    L = np.array([it[4] for it in info])
+    radii = np.hypot(P[:, 0], P[:, 1])
+    fit_off = float(np.ptp(radii)) >= 60.0
+
+    def rigid(Q):
+        mw, mq = Wp.mean(0), Q.mean(0)
+        Hm = (Wp - mw).T @ (Q - mq)
+        th_ = math.atan2(Hm[0, 1] - Hm[1, 0], Hm[0, 0] + Hm[1, 1])
+        R_ = np.array([[math.cos(th_), -math.sin(th_)], [math.sin(th_), math.cos(th_)]])
+        return th_, R_, mq - R_ @ mw
+
+    oa = ol = 0.0
+    for _ in range(5 if fit_off else 1):
+        th, R2, t2 = rigid(P + oa * F + ol * L)
+        if fit_off:  # offsets from the residual, with a +-10 mm prior
+            r_ = (Wp @ R2.T + t2) - P
+            A_ = np.vstack([np.c_[F[:, 0], L[:, 0]], np.c_[F[:, 1], L[:, 1]], np.eye(2) * 0.1])
+            oa, ol = np.linalg.lstsq(A_, np.r_[r_[:, 0], r_[:, 1], 0.0, 0.0], rcond=None)[0]
+    res = (Wp @ R2.T + t2) - (P + oa * F[:, :] + ol * L)
     rms = float(np.sqrt((res ** 2).sum(1).mean()))
+    # free similarity scale (Umeyama), only as a check of the camera model
+    Wc, Pc = Wp - Wp.mean(0), P - P.mean(0)
+    scale = float(np.linalg.svd(Wc.T @ Pc, compute_uv=False).sum() / (Wc ** 2).sum())
+    oa, ol = float(oa), float(ol)
     probe = [(u, v) for u in (220, 300, 380, 460) for v in (100, 180, 260)]
     old = np.array([locate.to77(locate.at(u, v, 264.0)) for u, v in probe])
     new = np.array([R2 @ locate.at(u, v, 264.0)[:2] + t2 for u, v in probe])
@@ -365,12 +398,15 @@ def cmd_fit2d(args):
            "n": len(info), "time": time.strftime("%Y-%m-%d %H:%M"),
            "residuals_mm": {str(it[0]): np.round(r_, 1).tolist() for it, r_ in zip(info, res)},
            "_src": "cal77.py fit2d: empty-hand hovers, open/close difference centroids"}
-    msg = (f"2-D 지도: {len(info)}곳, 잔차 rms {rms:.1f} mm, 회전 {math.degrees(th):+.2f}° (이전 "
+    if dropped:
+        print(f"fit2d: 화면 끝에 걸린 자리 {dropped} 제외", file=sys.stderr)
+    msg = (f"2-D 지도: {len(info)}곳 (반지름 {radii.min():.0f}-{radii.max():.0f} mm, 손가락 오프셋 "
+           f"{'맞춤' if fit_off else '0 고정'}), 잔차 rms {rms:.1f} mm, 회전 {math.degrees(th):+.2f}° (이전 "
            f"{locate.cal77().get('yaw_deg', float('nan')):+.2f}°), 이전 지도와 차이 평균 {shift.mean():.1f} mm (최대 {shift.max():.1f}), "
            f"손가락 중심 오프셋 앞 {oa:+.1f} / 옆 {ol:+.1f} mm, 축척 {scale:.3f}")
     if abs(scale - 1.0) > 0.03:
         msg += " (축척이 3% 넘게 달라요: 카메라 높이가 바뀌었을 수 있어요)"
-    if rms > 10.0 or len(info) < 8:  # 2026-11-25 old-room photos: 12 spots, 5.9 mm, map within 5.5 mm of the old one
+    if rms > 10.0 or len(info) < 6:  # 2026-11-25 old-room photos: 12 spots, 5.9 mm, map within 5.5 mm of the old one
         print(msg + ": 잔차가 크거나 자리가 적어 지도를 바꾸지 않아요")
         sys.exit(1)
     if not args.dry_run:

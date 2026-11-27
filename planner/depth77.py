@@ -61,6 +61,10 @@ def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=3
     table + low; the table top itself (+-12 mm) is never a box. pad grows every box sideways and upward (map error)."""
     P = points77(depth_png)
     t = plan77.TABLE
+    # cells where the table top itself is seen: an object whose cells mostly show the table too is held up off it
+    # (2026-11-27: a black pole ~140-180 mm above the table became a wall from the table up and blocked every grasp)
+    on_tab = P[np.abs(P[:, 2] - t) < 12.0]
+    tab_cells = {tuple(k) for k in np.unique(np.floor(on_tab[:, :2] / cell).astype(int), axis=0)} if len(on_tab) else set()
     keep = (P[:, 2] > t + low) & (P[:, 2] < t + 250.0) & (np.hypot(P[:, 0], P[:, 1]) < reach)
     if low < 12.0:
         keep &= np.abs(P[:, 2] - t) >= 12.0
@@ -108,12 +112,17 @@ def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=3
         tiles = {}
         for c in comp:
             tiles.setdefault((c[0] // per, c[1] // per), []).append(c)
+        floating = (min(under[c] for c in comp) > t + 100.0  # vials (+65) and the cup (+83) never float
+                    and np.mean([c in tab_cells for c in comp]) > 0.6)
         for cs in tiles.values():
             a = np.array(cs)
             lo, hi = a.min(0) * cell - 10.0 - pad, (a.max(0) + 1) * cell + 10.0 + pad
             zt = max(occ[c] for c in cs) + 10.0 + pad
             zb = min(under[c] for c in cs)
-            z0 = t if zb >= t - 12.0 else zb - 10.0 - pad  # on the table: from the table up; lower: its own bottom
+            if floating:  # held above the table (table seen under/beside it): from its lowest seen point down by the pad
+                z0 = max(t, zb - 10.0 - pad - 20.0)  # + 20: the top camera sees the top, not the underside
+            else:  # on the table: from the table up; below the table top: from its own bottom
+                z0 = t if zb >= t - 12.0 else zb - 10.0 - pad
             out.append((zt, lo, hi, z0))
     out.sort(key=lambda b: -b[0])  # tallest first if there are too many
     return [plan77.box(f"{prefix}{i}", (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, z0, zt, hi[0] - lo[0], hi[1] - lo[1])
