@@ -10,7 +10,7 @@ tool on the same scenario, 2026-11-27); with scipy's KD-tree that is seconds, th
 
 - Points: median of --frames top depth frames, 200 mm under to 450 mm over the table, in the camera world.
 - The .77 axis and yaw come from cal77.json and are perturbed by +-d mm (x, y) and +-yaw deg: 27 maps.
-- Self points (the arm at its start pose: within 40 mm of its spheres, inside r 75 of the axis, or within 90 mm of the
+- Self points (the arm at its start pose: within 50 mm of its spheres, inside r 75 of the axis, or within 90 mm of the
   spheres inside r 150 above the table) are found once, under the nominal map, and dropped in every map: they move
   with the arm, so a map error does not make them obstacles (per-map dropping flagged the arm's own shell at
   +-10 mm/+-6 deg), and a fixture just outside that band stays an obstacle in all maps (dropping what looks like the
@@ -126,35 +126,44 @@ def main() -> int:
         return np.column_stack([c * xy[:, 0] + s * xy[:, 1], -s * xy[:, 0] + c * xy[:, 1], W[:, 2] + kin77.BASE_DZ])
 
     self_pts = np.zeros(len(W), bool)
-    for m in [(0.0, 0.0, 0.0)]:
-        P = to_base(*m)
-        d0 = np.concatenate([(np.linalg.norm(P[i:i + 8192, None, :] - S0[None, :, :3], axis=2) - S0[None, :, 3]).min(1)
-                             for i in range(0, len(P), 8192)])  # to the start pose's spheres
-        rr = np.hypot(P[:, 0], P[:, 1])
-        self_pts |= (d0 <= 40.0) | (rr < 75.0) | ((d0 < 90.0) & (rr < 150.0) & (P[:, 2] > z_tab + 15.0))
+    P = to_base(0.0, 0.0, 0.0)
+    d0 = np.concatenate([(np.linalg.norm(P[i:i + 8192, None, :] - S0[None, :, :3], axis=2) - S0[None, :, 3]).min(1)
+                         for i in range(0, len(P), 8192)])  # to the start pose's spheres
+    rr = np.hypot(P[:, 0], P[:, 1])
+    # 50 mm like depth77.ARM_MARGIN: the shell and cables sit up to ~42-43 mm outside the spheres (2026-11-26 PARK
+    # measurement; 2026-11-27 an edge pixel of the upper arm 43 mm from its nearest sphere)
+    self_pts = (d0 <= 50.0) | (rr < 75.0) | ((d0 < 90.0) & (rr < 150.0) & (P[:, 2] > z_tab + 15.0))
+    keep = np.nonzero(~self_pts)[0]
     res = []
     for dx, dy, dw in maps:
-        obj = to_base(dx, dy, dw)[~self_pts]
+        obj = to_base(dx, dy, dw)[keep]
         top = np.abs(obj[:, 2] - z_tab) < 15.0
         c_all = float((nearest(S[:, :3], obj) - S[:, 3]).min()) if len(obj) else float("inf")
+        idx2 = keep[~top]
         o2 = obj[~top]
         if len(o2):
             dd = nearest(S[:, :3], o2) - S[:, 3]
             k = int(np.argmin(dd))
-            near = o2[int(np.argmin(np.linalg.norm(o2 - S[k, :3], axis=1)))]
-            c_obj = float(dd[k])
+            j = int(np.argmin(np.linalg.norm(o2 - S[k, :3], axis=1)))
+            c_obj, near, wi = float(dd[k]), o2[j], int(idx2[j])
         else:
-            c_obj, near = float("inf"), None
-        res.append((c_all, c_obj, dx, dy, dw, near))
+            c_obj, near, wi = float("inf"), None, -1
+        res.append((c_all, c_obj, dx, dy, dw, near, wi))
+
+    def where(r):
+        if r[5] is None:
+            return ""
+        p, w = r[5], W[r[6]]
+        u, v = locate.CAM.world_to_pixel(w)
+        return (f".77 반지름 {math.hypot(p[0], p[1]):.0f} mm, 방위 {math.degrees(math.atan2(p[1], p[0])):+.0f}°, "
+                f"테이블 {p[2] - z_tab:+.0f} mm, 컬러 px ({u:.0f}, {v:.0f})")
+
     nom = next(r for r in res if r[2] == 0 and r[3] == 0 and r[4] == 0)
     worst = min(res, key=lambda r: r[1])
-    msg = (f"경로-깊이 여유: 지도 그대로 {nom[1]:.0f} mm (테이블 면 포함 {nom[0]:.0f}), 27개 지도 중 최악 {worst[1]:.0f} mm "
-           f"(축 {worst[2]:+.0f}/{worst[3]:+.0f} mm, yaw {worst[4]:+.0f}°, 테이블 면 포함 최악 {min(r[0] for r in res):.0f})")
-    if worst[5] is not None:
-        p = worst[5]
-        msg += (f"; 가장 가까운 점 .77 반지름 {math.hypot(p[0], p[1]):.0f} mm, 방위 {math.degrees(math.atan2(p[1], p[0])):+.0f}°, "
-                f"테이블 {p[2] - z_tab:+.0f} mm")
-    msg += f"; 표본 {len(Q)}, 구 {len(S)}, 점 {len(W)}, {time.perf_counter() - t0:.1f} s"
+    msg = (f"경로-깊이 여유: 지도 그대로 {nom[1]:.0f} mm (테이블 면 포함 {nom[0]:.0f}) [{where(nom)}]; 27개 지도 중 최악 "
+           f"{worst[1]:.0f} mm (축 {worst[2]:+.0f}/{worst[3]:+.0f} mm, yaw {worst[4]:+.0f}°, 테이블 면 포함 최악 "
+           f"{min(r[0] for r in res):.0f}) [{where(worst)}]")
+    msg += f"; 표본 {len(Q)}, 구 {len(S)}, 점 {len(W)} (자기 {int(self_pts.sum())}), {time.perf_counter() - t0:.1f} s"
     ok = worst[1] >= a.min
     print(msg + ("" if ok else f": {a.min:.0f} mm 미만이라 통과 못 해요"))
     return 0 if ok else 1
