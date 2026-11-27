@@ -495,6 +495,12 @@ def plan_pour(cup_xy, scene: Scene, api=None, obs=None, pitch=0.0, max_tries=40)
 ACC = 100.0
 
 
+# Per-joint share of a leg's speed cap. 2026-11-27 (AGX, exhibit site): the arm server refused twice ("J3 20.1 / 21.4
+# deg from measured") on the first leg from park toward a vial, where J3 swings +30 -> -130 with the arm reaching out
+# at the 45 deg/s cap; at ~28 deg/s (a 1.6x slower run) it never tripped. Only J3 is slowed, to 0.62 of the cap.
+JOINT_SPEED_SCALE = np.array([1.0, 1.0, 0.62, 1.0, 1.0, 1.0])
+
+
 def timed(legs, dt=0.05, acc=ACC):
     pts, caps = [np.asarray(legs[0][0][0], float)], []
     for wps, cap in legs:
@@ -510,7 +516,7 @@ def timed(legs, dt=0.05, acc=ACC):
     Q = np.array(pts)
     if len(Q) < 2:
         return Q
-    ds = np.max(np.abs(np.diff(Q, axis=0)), axis=1)
+    ds = np.max(np.abs(np.diff(Q, axis=0)) / JOINT_SPEED_SCALE, axis=1)  # each joint at most scale x cap
     caps = np.array(caps)
     v = np.zeros(len(Q))
     for i in range(1, len(Q)):
