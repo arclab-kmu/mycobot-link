@@ -55,7 +55,7 @@ def points77(depth_png: bytes, stride: int = 2) -> np.ndarray:
 
 
 def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=30, cell=20.0, tile=60.0,
-          reach=420.0, prefix="dep", low=12.0, pad=0.0):
+          reach=420.0, prefix="dep", low=12.0, pad=0.0, base_r=85.0):
     """cuRobo boxes (real .77 frame, via plan77.box) of what stands on the table. `skip`: [(x, y, r)] to leave out.
     low < 0 also takes what stands lower than the table top (the .77's own lower desk: router, keyboard), down to
     table + low; the table top itself (+-12 mm) is never a box. pad grows every box sideways and upward (map error)."""
@@ -65,7 +65,11 @@ def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=3
     # (2026-11-27: a black pole ~140-180 mm above the table became a wall from the table up and blocked every grasp)
     on_tab = P[np.abs(P[:, 2] - t) < 12.0]
     tab_cells = {tuple(k) for k in np.unique(np.floor(on_tab[:, :2] / cell).astype(int), axis=0)} if len(on_tab) else set()
-    keep = (P[:, 2] > t + low) & (P[:, 2] < t + 250.0) & (np.hypot(P[:, 0], P[:, 1]) < reach)
+    # above the table, inside base_r of the .77 axis is the arm's own column and cable (2026-11-27: a chunk at r ~70
+    # survived the 50 mm sphere margin at the room park and blocked joint 4 by 0.5 mm). Below the table top (the
+    # lower desk, low < 0) things next to the base stay: a router stood there that morning.
+    rxy = np.hypot(P[:, 0], P[:, 1])
+    keep = (P[:, 2] > t + low) & (P[:, 2] < t + 250.0) & (rxy < reach) & ((rxy > base_r) | (P[:, 2] < t))
     if low < 12.0:
         keep &= np.abs(P[:, 2] - t) >= 12.0
     P = P[keep]

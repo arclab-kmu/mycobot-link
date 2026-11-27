@@ -364,6 +364,18 @@ def grasp_deeper_mm() -> float:
         return 0.0
 
 
+def grasp_dz_mm() -> float:
+    """A height shift of every grasp candidate (planner mm), LAB/cal77_grasp.json {"dz_mm": d}. 2026-11-27 exhibit
+    vials: at the taught height the fingers closed on the cap (gripper 15, below the held range); -4 planned at the
+    vial's spot, -8 and -15 found no plan there (the AGX session's GRASP_DZ)."""
+    import os
+    p = Path(os.environ.get("MYCOBOT_LAB", "~/Documents/lab-jetson/console")).expanduser() / "cal77_grasp.json"
+    try:
+        return float(json.loads(p.read_text()).get("dz_mm", 0.0)) if p.exists() else 0.0
+    except (ValueError, OSError):
+        return 0.0
+
+
 def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=(), only=None, pitches=(0.0, 5.0, 8.0, 12.0),
                deeper=None):
     G = TPL["grasp"]
@@ -375,6 +387,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
     dth = bearing(V) - bearing(V0)
     V0r = (Rz(dth) @ np.r_[V0, 0])[:2]
     T0, a0, H0 = _template_frames()
+    gdz = grasp_dz_mm()
     why = []
     cands = _grasp_candidates(pitches=pitches)
     if only is not None:  # e.g. a place pose must hold the vial exactly like the grasp did: same pitch, dz, shallow
@@ -388,7 +401,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
         target = V - shallow * a_dir
         Hs = Rz(dth + spin) @ H0
         Tg = kin.fk_taught(np.r_[G["q"][0] + dth, G["q"][1:]])
-        Tg[:3, 3] += np.r_[target - V0r, dz]
+        Tg[:3, 3] += np.r_[target - V0r, dz + gdz]
         Tg = turn_about(Tg, target, spin)
         pivot = Tg[:3, :3] @ TLV + Tg[:3, 3]
         P = np.eye(4)
@@ -399,7 +412,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
             qr = np.array(q, float)
             qr[0] += dth
             T = kin.fk_taught(qr)  # taught template pose
-            T[:3, 3] += np.r_[target - V0r, dz]
+            T[:3, 3] += np.r_[target - V0r, dz + gdz]
             tl.append((qr, P @ turn_about(T, target, spin)))
         items.append(((pitch, dz, shallow, spin), tag, a_dir, tl))
     for (key, tag, a_dir, _), (chain, e) in zip(items, _chains([it[3] for it in items])):
