@@ -396,7 +396,7 @@ def plan_grasp(vial_xy, scene: Scene, api=None, obs=None, max_tries=140, skip=()
     for pitch, dz, shallow, spin in cands[:max_tries]:
         if (pitch, dz, shallow, spin) in skip:
             continue
-        tag = f"pitch {pitch:.0f} dz {dz:.0f} shallow {shallow:.0f} spin {spin}"
+        tag = f"pitch {pitch:.0f} dz {dz:.0f}{f'{gdz:+.0f}' if gdz else ''} shallow {shallow:.0f} spin {spin}"
         a_dir = Rz(dth + spin)[:2, :2] @ a0
         target = V - shallow * a_dir
         Hs = Rz(dth + spin) @ H0
