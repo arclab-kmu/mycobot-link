@@ -111,6 +111,28 @@ def cmd_plan(args):
             c = r_f + 350.0
             obs.append(plan77.box(f"fence{k}", c * math.cos(a), c * math.sin(a), plan77.TABLE - 30.0, plan77.TABLE + h_f,
                                   700.0, 1400.0, ang))
+    import matcha_dyn
+    q_now = matcha_dyn.arm_q("77")
+    start = plan77.PARK if q_now is None else q_now
+    if args.board_margin:
+        # the board box sits on the depth edge mapped by a map this run is about to fix: move its near face toward the
+        # .77 by M (its local +x points into the table, board77.py)
+        for o in obs:
+            if o["name"] == "board":
+                yaw = 2.0 * math.atan2(o["pose"][6], o["pose"][3])
+                o["dims_mm"][0] += args.board_margin
+                o["pose"][0] -= math.cos(yaw) * args.board_margin / 2
+                o["pose"][1] -= math.sin(yaw) * args.board_margin / 2
+    if args.depth_obs is not None:
+        # what stands near the arm, from the top depth at this moment, grown by PAD for the map error (2026-11-27:
+        # the AGX cross-check found the black pole at r 241-278 inside the fence and desk items near the base)
+        import depth77
+        png = urllib.request.urlopen(depth77.DEPTH_URL, timeout=5).read()
+        dep = depth77.boxes(png, q77=start, low=args.depth_low, pad=args.depth_obs,
+                            max_boxes=max(0, plan77.MAX_OBS - len(obs)))
+        print(f"cal77 plan: {len(dep)} depth boxes (pad {args.depth_obs:.0f} mm, from table {args.depth_low:+.0f})",
+              file=sys.stderr)
+        obs = obs + dep
     spots = []
     grid = [(x, y) for y in range(-220, 61, 40) for x in (range(100, 241, 35) if (y // 40) % 2 else range(240, 99, -35))]
     if args.ring:
@@ -144,9 +166,6 @@ def cmd_plan(args):
             break
     if len(spots) < 6:
         raise SystemExit(f"only {len(spots)} reachable hover spots")
-    import matcha_dyn
-    q_now = matcha_dyn.arm_q("77")
-    start = plan77.PARK if q_now is None else q_now
     # --end-here: come back to where the arm stood (2026-11-26: the taught PARK touched the raised board in cuRobo)
     seq = [start] + [s[3] for s in spots] + [start if args.end_here else plan77.PARK]
     segs = []
@@ -409,6 +428,12 @@ if __name__ == "__main__":
                    help="objects left in place: keep the arm above table + H beyond R mm from the .77 axis")
     p.add_argument("--fence", type=float, nargs=2, metavar=("R_MM", "H_MM"),
                    help="keep the arm inside R mm of the .77 axis below table + H (tall fixtures farther out)")
+    p.add_argument("--depth-obs", type=float, metavar="PAD_MM",
+                   help="add the top depth's boxes (depth77) around the arm, grown by PAD_MM for the map error")
+    p.add_argument("--depth-low", type=float, default=-205.0,
+                   help="with --depth-obs: also take things this far under the table top (the .77's lower desk)")
+    p.add_argument("--board-margin", type=float, default=0.0, metavar="MM",
+                   help="move the board's near face this much toward the .77 (map error at the table edge)")
     p.add_argument("--polar", type=float, nargs="+", metavar="R", help="hover radii (mm), with --bearings")
     p.add_argument("--bearings", type=float, nargs=3, default=[-20.0, 70.0, 15.0], metavar=("FROM", "TO", "STEP"))
     p.add_argument("--max-spots", type=int, default=14)

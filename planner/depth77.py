@@ -55,11 +55,15 @@ def points77(depth_png: bytes, stride: int = 2) -> np.ndarray:
 
 
 def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=30, cell=20.0, tile=60.0,
-          reach=420.0, prefix="dep"):
-    """cuRobo boxes (real .77 frame, via plan77.box) of what stands on the table. `skip`: [(x, y, r)] to leave out."""
+          reach=420.0, prefix="dep", low=12.0, pad=0.0):
+    """cuRobo boxes (real .77 frame, via plan77.box) of what stands on the table. `skip`: [(x, y, r)] to leave out.
+    low < 0 also takes what stands lower than the table top (the .77's own lower desk: router, keyboard), down to
+    table + low; the table top itself (+-12 mm) is never a box. pad grows every box sideways and upward (map error)."""
     P = points77(depth_png)
     t = plan77.TABLE
-    keep = (P[:, 2] > t + 12.0) & (P[:, 2] < t + 250.0) & (np.hypot(P[:, 0], P[:, 1]) < reach)
+    keep = (P[:, 2] > t + low) & (P[:, 2] < t + 250.0) & (np.hypot(P[:, 0], P[:, 1]) < reach)
+    if low < 12.0:
+        keep &= np.abs(P[:, 2] - t) >= 12.0
     P = P[keep]
     if q77 is not None and len(P):
         import spheres
@@ -82,7 +86,10 @@ def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=3
     inv = inv.ravel()
     top = np.full(len(keys), -1e9)
     np.maximum.at(top, inv, P[:, 2])
+    bot = np.full(len(keys), 1e9)
+    np.minimum.at(bot, inv, P[:, 2])
     occ = {tuple(k): float(h) for k, h, n in zip(keys, top, cnt) if n >= 3}  # a stray pixel or two is not an object
+    under = {tuple(k): float(b) for k, b in zip(keys, bot)}
     per = max(1, int(round(tile / cell)))
     seen, out = set(), []
     for k in sorted(occ, key=lambda k_: -occ[k_]):
@@ -103,12 +110,14 @@ def boxes(depth_png: bytes, q77=None, skip=(), cup=None, cup_r=45.0, max_boxes=3
             tiles.setdefault((c[0] // per, c[1] // per), []).append(c)
         for cs in tiles.values():
             a = np.array(cs)
-            lo, hi = a.min(0) * cell - 10.0, (a.max(0) + 1) * cell + 10.0
-            zt = max(occ[c] for c in cs) + 10.0
-            out.append((zt, lo, hi))
+            lo, hi = a.min(0) * cell - 10.0 - pad, (a.max(0) + 1) * cell + 10.0 + pad
+            zt = max(occ[c] for c in cs) + 10.0 + pad
+            zb = min(under[c] for c in cs)
+            z0 = t if zb >= t - 12.0 else zb - 10.0 - pad  # on the table: from the table up; lower: its own bottom
+            out.append((zt, lo, hi, z0))
     out.sort(key=lambda b: -b[0])  # tallest first if there are too many
-    return [plan77.box(f"{prefix}{i}", (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, t, zt, hi[0] - lo[0], hi[1] - lo[1])
-            for i, (zt, lo, hi) in enumerate(out[:max_boxes])]
+    return [plan77.box(f"{prefix}{i}", (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, z0, zt, hi[0] - lo[0], hi[1] - lo[1])
+            for i, (zt, lo, hi, z0) in enumerate(out[:max_boxes])]
 
 
 if __name__ == "__main__":
@@ -118,10 +127,12 @@ if __name__ == "__main__":
     ap.add_argument("--q", nargs=6, type=float)
     ap.add_argument("--skip", nargs=3, type=float, action="append", default=[])
     ap.add_argument("--depth", help="a saved depth PNG instead of the live viewer")
+    ap.add_argument("--low", type=float, default=12.0)
+    ap.add_argument("--pad", type=float, default=0.0)
     a = ap.parse_args()
     png = Path(a.depth).read_bytes() if a.depth else urllib.request.urlopen(DEPTH_URL, timeout=5).read()
     t0 = time.perf_counter()
-    bx = boxes(png, a.q, a.skip)
+    bx = boxes(png, a.q, a.skip, low=a.low, pad=a.pad, max_boxes=60)
     dt = time.perf_counter() - t0
     for b in bx:
         print(b["name"], [round(v) for v in b["pose"][:3]], [round(v) for v in b["dims_mm"]])
